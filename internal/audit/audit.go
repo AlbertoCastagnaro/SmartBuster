@@ -111,6 +111,43 @@ type classifiedEntry struct {
 	NoiseFloor  int     `json:"noise_floor"`
 }
 
+// techProfileEntry is the JSONL record for a tech.detected/waf.detected
+// milestone (spec §6: "provenance surfaces ... in the audit log").
+type techProfileEntry struct {
+	Type string          `json:"type"`
+	TS   time.Time       `json:"ts"`
+	Host string          `json:"host"`
+	WAF  string          `json:"waf,omitempty"`
+	Tech []techEntryJSON `json:"tech"`
+}
+
+type techEntryJSON struct {
+	Name       string   `json:"name"`
+	Category   string   `json:"category"`
+	Version    string   `json:"version,omitempty"`
+	Confidence float64  `json:"confidence"`
+	Layer      string   `json:"layer"`
+	Sources    []string `json:"sources"`
+	RuleIDs    []string `json:"rule_ids,omitempty"`
+}
+
+// WriteTechProfile implements engine.TechAuditSink.
+func (w *Writer) WriteTechProfile(host string, tech []engine.TechEntry, waf string) {
+	e := techProfileEntry{Type: "tech_profile", TS: time.Now(), Host: host, WAF: waf}
+	for _, t := range tech {
+		e.Tech = append(e.Tech, techEntryJSON{
+			Name: t.Name, Category: t.Category, Version: t.Version,
+			Confidence: t.Confidence, Layer: t.Layer, Sources: t.Sources, RuleIDs: t.RuleIDs,
+		})
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.enc.Encode(e); err != nil {
+		fmt.Fprintf(os.Stderr, "audit: write failed: %v\n", err)
+	}
+}
+
 // WriteRequest implements engine.AuditSink. It never returns an error or
 // panics on a write failure — the audit log must not be able to crash a
 // scan — instead surfacing the failure on stderr.

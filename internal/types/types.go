@@ -30,6 +30,12 @@ type ResponseSignature struct {
 	SetCookie   bool
 	Reflected   bool // requested token echoed in body (diagnostic)
 	Elapsed     time.Duration
+
+	// NormBody is the normalized body text, populated only for calibration
+	// probes (Phase 2a addition; see internal/profile's handoff report for
+	// why). Left empty for ordinary candidate responses so the hot path
+	// stays exactly as compact as Phase 1 designed it.
+	NormBody string
 }
 
 // Baseline: learned "not found" profile for one directory.
@@ -44,6 +50,11 @@ type Baseline struct {
 	RepRedirect string
 	IsWildcard  bool
 	IsSPA       bool
+
+	// RepBody is the representative (medoid) probe's normalized body text —
+	// Phase 2a's error-page tech fingerprint (spec §4.6) reuses it instead
+	// of making an extra request. See ResponseSignature.NormBody.
+	RepBody string
 }
 
 type Classification struct {

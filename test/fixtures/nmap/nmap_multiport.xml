@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sV -oX - 10.0.0.5">
+  <host>
+    <status state="up" reason="syn-ack"/>
+    <address addr="10.0.0.5" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack"/>
+        <service name="http" product="nginx" version="1.18.0" method="probe" conf="10"/>
+      </port>
+      <port protocol="tcp" portid="8443">
+        <state state="open" reason="syn-ack"/>
+        <service name="https-alt" product="nginx" version="1.18.0" tunnel="ssl" method="probe" conf="10"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>

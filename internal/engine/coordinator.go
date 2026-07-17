@@ -13,6 +13,7 @@ import (
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/calibration"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/profile"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/wordlist"
 )
@@ -112,6 +113,14 @@ type Coordinator struct {
 
 	auditSink AuditSink
 	emitter   EventEmitter
+
+	// Phase 2a target profiling (spec §0 contract B).
+	profileState *profile.TargetProfile
+	extSet       []string // calibration/probe extensions; profile.ExtensionsForStack() once set
+	ruleset      *profile.Ruleset
+	wappalyzer   *profile.Wappalyzer
+	nmapSeeds    []profile.NmapSeed
+	runCtx       context.Context // set at Run() entry; finishCalibration's post-calibration refine needs it
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -148,6 +157,17 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	pacer := httpclient.NewPacer(limiter, rng)
 
+	rulesOff := cfg.RulesOff
+	if rulesOff == nil {
+		rulesOff = profile.DefaultRulesOff
+	}
+	ruleset, err := profile.Load(profile.LoadOptions{
+		SystemDir: cfg.RulesetDir, UserDir: cfg.UserRulesDir, RulesOff: rulesOff,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load ruleset: %w", err)
+	}
+
 	c := &Coordinator{
 		target:      target,
 		config:      cfg,
@@ -165,6 +185,9 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		resultsCh:   make(chan WorkResult, cfg.Concurrency),
 		auditSink:   noopAuditSink{},
 		emitter:     noopEmitter{},
+		extSet:      calibration.ExtSet,
+		ruleset:     ruleset,
+		wappalyzer:  getSharedWappalyzer(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -204,7 +227,9 @@ func PreviewRequests(target string, wl []wordlist.Entry, seed int64) []string {
 // are spawned and joined here; Run does not return until every worker
 // goroutine has exited.
 func (c *Coordinator) Run(ctx context.Context) {
+	c.runCtx = ctx
 	c.emit(Event{Type: EventScanStarted, URL: c.target})
+	c.profileTarget(ctx) // spec §0 contract B: before any real dispatch
 	c.seedRoot()
 
 	var wg sync.WaitGroup
@@ -362,7 +387,7 @@ func (c *Coordinator) startCalibration(dir string, depth int, branchStart time.T
 	c.calibratingOrder = append(c.calibratingOrder, dir)
 
 	rng := dirRand(c.config.Seed, dir)
-	for _, ext := range calibration.ExtSet {
+	for _, ext := range c.extSet {
 		for i := 0; i < calibration.NProbes; i++ {
 			token := randToken(rng, 12)
 			p := dir + "/" + token + ext
@@ -453,7 +478,7 @@ func (c *Coordinator) collectProbe(res WorkResult) {
 }
 
 func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
-	baseline := calibration.Calibrate(dir, ds.probeResults)
+	baseline := calibration.Calibrate(dir, c.extSet, ds.probeResults)
 	c.baselines[dir] = &baseline
 	c.removeCalibratingDir(dir)
 	ds.state = dirScanning
@@ -462,13 +487,29 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 	if baseline.IsSPA {
 		c.emit(Event{Type: EventWarning, Dir: dir, Message: "brute-force likely futile: SPA catch-all"})
 	}
+
+	// The root baseline is what the error-page signal and active-probe
+	// confirmation need (spec §4.6, §4.7); refine here rather than in
+	// profileTarget, which runs before this baseline exists.
+	if dir == "" && c.profileState != nil {
+		c.profileState.IsSPA = baseline.IsSPA
+		profile.RefineAfterCalibration(c.runCtx, c.client, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
+		c.emitTechDetected()
+	}
+
 	c.pushWordlistCandidates(dir, ds)
 }
 
 // pushWordlistCandidates pushes the full wordlist for dir once its baseline
-// exists (spec §9). Phase 1 Score = BasePrio.
+// exists (spec §9). Phase 1 Score = BasePrio. Root additionally gets any
+// nmap-seeded paths (spec §7), scored above BasePrio's range so they're
+// tried first; they're TypeFullPath so isDirectory() never recurses into
+// them (Phase 2a doesn't attempt to map discovered nmap paths as dirs).
 func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 	ds.candidatesTotal = len(c.wordlist)
+	if dir == "" {
+		ds.candidatesTotal += len(c.nmapSeeds)
+	}
 	if ds.candidatesTotal == 0 {
 		ds.state = dirDone
 		return
@@ -476,6 +517,9 @@ func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 	ds.budget = ds.candidatesTotal // PER_DIR_BUDGET default = wordlist size
 	if c.config.PerDirBudget > 0 {
 		ds.budget = c.config.PerDirBudget
+		if dir == "" {
+			ds.budget += len(c.nmapSeeds)
+		}
 	}
 
 	provenance := "wordlist"
@@ -496,6 +540,20 @@ func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 			ParentDir:  dir,
 			Provenance: provenance,
 		})
+	}
+
+	if dir == "" {
+		for _, seed := range c.nmapSeeds {
+			c.frontier.Push(Candidate{
+				Path:       seed.Path,
+				Type:       TypeFullPath,
+				BasePrio:   1.0,
+				Score:      nmapSeedScore,
+				Depth:      ds.depth + 1,
+				ParentDir:  dir,
+				Provenance: seed.Provenance,
+			})
+		}
 	}
 }
 

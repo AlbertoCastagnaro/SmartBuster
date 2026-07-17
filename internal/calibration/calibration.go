@@ -23,14 +23,18 @@ const (
 	LenZThreshold   = 3.0
 )
 
-// ExtSet is the fixed set of calibration probe extensions for Phase 1.
+// ExtSet is the Phase 1 fixed set of calibration probe extensions, used as
+// the fallback before a target profile exists (spec §0 contract A) — e.g.
+// --dry-run, which never runs profiling, and PreviewRequests below.
 var ExtSet = []string{"", ".php", ".html"}
 
 // Calibrate builds a negative baseline for dir from probes — N_PROBES *
-// len(ExtSet) signatures already gathered by the coordinator, grouped
-// contiguously by extension (all samples for ext[0], then ext[1], ...).
-func Calibrate(dir string, probes []ResponseSignature) Baseline {
-	noiseFloor := noiseFloorFromProbes(probes)
+// len(exts) signatures already gathered by the coordinator, grouped
+// contiguously by extension (all samples for exts[0], then exts[1], ...).
+// exts is supplied by the caller (Phase 2a: profile.ExtensionsForStack(),
+// falling back to ExtSet before a profile exists — spec §0 contract A).
+func Calibrate(dir string, exts []string, probes []ResponseSignature) Baseline {
+	noiseFloor := noiseFloorFromProbes(exts, probes)
 
 	lens := make([]float64, len(probes))
 	for i, p := range probes {
@@ -54,6 +58,7 @@ func Calibrate(dir string, probes []ResponseSignature) Baseline {
 		RepRedirect: rep.RedirectTo,
 		IsWildcard:  isWildcard,
 		IsSPA:       isSPA,
+		RepBody:     rep.NormBody,
 	}
 }
 
@@ -131,10 +136,10 @@ func maxPairwiseHamming(probes []ResponseSignature) int {
 	return maxD
 }
 
-// probesByExt splits probes into len(ExtSet) contiguous chunks, matching how
-// the coordinator appends N_PROBES samples per extension in ExtSet order.
-func probesByExt(probes []ResponseSignature) [][]ResponseSignature {
-	numExts := len(ExtSet)
+// probesByExt splits probes into len(exts) contiguous chunks, matching how
+// the coordinator appends N_PROBES samples per extension in exts order.
+func probesByExt(exts []string, probes []ResponseSignature) [][]ResponseSignature {
+	numExts := len(exts)
 	if numExts == 0 || len(probes) == 0 {
 		return nil
 	}
@@ -153,9 +158,9 @@ func probesByExt(probes []ResponseSignature) [][]ResponseSignature {
 	return groups
 }
 
-func noiseFloorFromProbes(probes []ResponseSignature) int {
+func noiseFloorFromProbes(exts []string, probes []ResponseSignature) int {
 	maxD := 0
-	for _, group := range probesByExt(probes) {
+	for _, group := range probesByExt(exts, probes) {
 		for i := 0; i < len(group); i++ {
 			for j := i + 1; j < len(group); j++ {
 				if d := simhash.Hamming(group[i].SimHash, group[j].SimHash); d > maxD {

@@ -1,0 +1,13 @@
+[
+  {"id":"waf-cloudflare-header","vendor":"Cloudflare","header":"Server","pattern":"(?i)cloudflare"},
+  {"id":"waf-cloudflare-cfray","vendor":"Cloudflare","header":"Cf-Ray","pattern":".+"},
+  {"id":"waf-cloudflare-cookie1","vendor":"Cloudflare","cookie":"__cfduid"},
+  {"id":"waf-cloudflare-cookie2","vendor":"Cloudflare","cookie":"cf_clearance"},
+  {"id":"waf-akamai-header","vendor":"Akamai","header":"Server","pattern":"(?i)akamaighost"},
+  {"id":"waf-akamai-x","vendor":"Akamai","header":"X-Akamai-Transformed","pattern":".+"},
+  {"id":"waf-incapsula-cookie1","vendor":"Imperva Incapsula","cookie":"incap_ses"},
+  {"id":"waf-incapsula-cookie2","vendor":"Imperva Incapsula","cookie":"visid_incap"},
+  {"id":"waf-awswaf-header","vendor":"AWS WAF","header":"X-Amzn-Requestid","pattern":".+"},
+  {"id":"waf-awswaf-challenge","vendor":"AWS WAF","pattern":"awswaf|aws-waf-token","body_only":true},
+  {"id":"waf-sucuri-header","vendor":"Sucuri","header":"X-Sucuri-Id","pattern":".+"}
+]

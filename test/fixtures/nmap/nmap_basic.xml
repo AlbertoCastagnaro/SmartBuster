@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sV --script http-enum,http-server-header -oX - example.test">
+  <host>
+    <status state="up" reason="syn-ack"/>
+    <address addr="93.184.216.34" addrtype="ipv4"/>
+    <hostnames>
+      <hostname name="example.test" type="user"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack"/>
+        <service name="http" product="Apache httpd" version="2.4.41" extrainfo="(Ubuntu)" method="probe" conf="10"/>
+        <script id="http-server-header" output="Apache/2.4.41 (Ubuntu)"/>
+        <script id="http-enum" output="&#10;  /admin/: Possible admin folder&#10;  /backup/: Backup directory&#10;  /config.php: PHP configuration file&#10;"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>

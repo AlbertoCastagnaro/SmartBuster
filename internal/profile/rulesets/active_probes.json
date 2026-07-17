@@ -1,0 +1,8 @@
+[
+  {"id":"ap-wordpress","tech":"WordPress","path":"/wp-login.php","confidence":0.95},
+  {"id":"ap-joomla","tech":"Joomla","path":"/administrator/","confidence":0.95},
+  {"id":"ap-springboot","tech":"Spring Boot","path":"/actuator","confidence":0.95},
+  {"id":"ap-drupal","tech":"Drupal","path":"/user/login","confidence":0.95},
+  {"id":"ap-git","tech":".git","path":"/.git/HEAD","confidence":0.95},
+  {"id":"ap-dotnet","tech":"ASP.NET","path":"/web.config","confidence":0.95}
+]

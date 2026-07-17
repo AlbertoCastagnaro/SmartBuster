@@ -22,6 +22,15 @@ type Config struct {
 
 	PerDirBudget  int           // 0 = default to wordlist size (spec §13 PER_DIR_BUDGET)
 	TimePerBranch time.Duration // 0 = disabled (spec §13 default)
+
+	// Phase 2a target profiling (spec §8).
+	RulesetDir   string   // system ruleset dir; "" = embedded defaults only
+	UserRulesDir string   // user overlay dir; "" = none
+	RulesOff     []string // categories to drop; "" (nil) = profile.DefaultRulesOff
+	NmapFile     string   // --nmap: path to an nmap -oX XML file to ingest
+	RunNmap      bool     // --run-nmap: opt-in, shells out to nmap
+	ActiveProbes bool     // default false: passive-only unless asked
+	FaviconProbe bool     // default true: callers must set this explicitly
 }
 
 const (

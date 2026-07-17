@@ -18,6 +18,7 @@ import (
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/engine"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/output"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/profile"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/wordlist"
 )
@@ -32,6 +33,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		runScan(os.Args[2:])
+	case "ruleset":
+		runRuleset(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -43,6 +46,32 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: smartbuster scan <target> [<target>...] -w <wordlist> [flags]")
+	fmt.Fprintln(os.Stderr, "       smartbuster ruleset update --repo <url> --commit <ref> [--dest <dir>]")
+}
+
+func runRuleset(args []string) {
+	fs := flag.NewFlagSet("ruleset", flag.ExitOnError)
+	if len(args) == 0 || args[0] != "update" {
+		fmt.Fprintln(os.Stderr, "usage: smartbuster ruleset update --repo <url> --commit <ref> [--dest <dir>]")
+		os.Exit(2)
+	}
+	repo := fs.String("repo", "", "git URL of the ruleset repo to pull (required)")
+	commit := fs.String("commit", "", "pinned commit/ref to check out (required)")
+	dest := fs.String("dest", defaultSystemRulesetDir(), "system ruleset directory to write into")
+	fs.Parse(args[1:])
+
+	if err := profile.Update(profile.UpdateOptions{Repo: *repo, Commit: *commit, Dest: *dest}); err != nil {
+		fatalf("ruleset update: %v", err)
+	}
+	fmt.Printf("ruleset updated in %s (commit %s)\n", *dest, *commit)
+}
+
+func defaultSystemRulesetDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "smartbuster", "rules")
 }
 
 // stringList accumulates repeatable flag values (flag.Value).
@@ -92,6 +121,15 @@ func runScan(args []string) {
 	dryRun := fs.Bool("dry-run", false, "print the requests that would be sent, without sending them")
 	outDir := fs.String("out", "smartbuster-out", "output directory for the audit log and result exports")
 
+	rulesetDir := fs.String("ruleset-dir", "", "system ruleset directory (overlays the embedded defaults); \"\" = embedded only")
+	userRulesDir := fs.String("user-rules-dir", "", "user ruleset overlay directory (highest precedence); \"\" = none")
+	var rulesOff stringList
+	fs.Var(&rulesOff, "rules-off", fmt.Sprintf("rule category to suppress (repeatable); default %v", profile.DefaultRulesOff))
+	nmapFile := fs.String("nmap", "", "path to an nmap -oX XML file to ingest for target profiling")
+	runNmap := fs.Bool("run-nmap", false, "opt-in: shell out to nmap -sV --script http-enum,http-headers,ssl-cert (requires nmap on PATH)")
+	activeProbes := fs.Bool("active-probes", false, "fire confirmer requests (e.g. /wp-login.php) for mid-confidence tech detections")
+	faviconProbe := fs.Bool("favicon-probe", true, "fetch /favicon.ico during target profiling")
+
 	var allowHosts, excludeHosts, excludePatterns stringList
 	fs.Var(&allowHosts, "allow-host", "additional in-scope host (repeatable); defaults to the target(s)' own host")
 	fs.Var(&excludeHosts, "exclude-host", "host to exclude from scope (repeatable)")
@@ -101,7 +139,9 @@ func runScan(args []string) {
 	// the positional target before the flags, but Go's flag package stops
 	// parsing at the first non-flag token. Reorder so flags and positionals
 	// can appear in any order, matching normal CLI conventions.
-	flagArgs, targets := splitFlagsAndPositional(args, map[string]bool{"dry-run": true})
+	flagArgs, targets := splitFlagsAndPositional(args, map[string]bool{
+		"dry-run": true, "run-nmap": true, "active-probes": true, "favicon-probe": true,
+	})
 	fs.Parse(flagArgs)
 	if *wordlistPath == "" || len(targets) == 0 {
 		usage()
@@ -127,6 +167,8 @@ func runScan(args []string) {
 		Targets: targets, Wordlist: *wordlistPath, Concurrency: *concurrency,
 		Rate: *rate, Jitter: *jitter, MaxDepth: *maxDepth, RequestTO: *requestTO,
 		Seed: *seed, DryRun: *dryRun, OutDir: *outDir,
+		RulesetDir: *rulesetDir, UserRulesDir: *userRulesDir, RulesOff: rulesOff,
+		NmapFile: *nmapFile, RunNmap: *runNmap, ActiveProbes: *activeProbes, FaviconProbe: *faviconProbe,
 	}
 
 	if *dryRun {
@@ -219,6 +261,12 @@ func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg e
 			fmt.Printf("[throttle] %s\n", e.Message)
 		case engine.EventTrapDetected:
 			fmt.Printf("[trap] %s: %s\n", e.Dir, e.Message)
+		case engine.EventTechDetected:
+			for _, tech := range e.Tech {
+				fmt.Printf("[tech] %s (%s, conf: %.2f, layer: %s)\n", tech.Name, tech.Category, tech.Confidence, tech.Layer)
+			}
+		case engine.EventWAFDetected:
+			fmt.Printf("[waf] %s\n", e.WAF)
 		}
 	})
 

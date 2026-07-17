@@ -1,0 +1,17 @@
+[
+  {"id":"ck-phpsessid","cookie":"PHPSESSID","tech":"PHP","category":"language","layer":"backend","confidence":0.85},
+  {"id":"ck-jsessionid","cookie":"JSESSIONID","tech":"Java","category":"language","layer":"backend","confidence":0.85},
+  {"id":"ck-aspnetsession","cookie":"ASP.NET_SessionId","tech":"ASP.NET","category":"framework","layer":"backend","confidence":0.85},
+  {"id":"ck-aspxauth","cookie":".ASPXAUTH","tech":"ASP.NET","category":"framework","layer":"backend","confidence":0.85},
+  {"id":"ck-laravel","cookie":"laravel_session","tech":"Laravel","category":"framework","layer":"backend","confidence":0.85},
+  {"id":"ck-laravel-php","cookie":"laravel_session","tech":"PHP","category":"language","layer":"backend","confidence":0.85},
+  {"id":"ck-xsrf-laravel","cookie":"XSRF-TOKEN","tech":"Laravel","category":"framework","layer":"backend","confidence":0.6},
+  {"id":"ck-django-csrf","cookie":"csrftoken","tech":"Django","category":"framework","layer":"backend","confidence":0.6},
+  {"id":"ck-django-session","cookie":"sessionid","tech":"Django","category":"framework","layer":"backend","confidence":0.6},
+  {"id":"ck-connect-sid","cookie":"connect.sid","tech":"Express","category":"framework","layer":"backend","confidence":0.85},
+  {"id":"ck-connect-sid-node","cookie":"connect.sid","tech":"Node.js","category":"language","layer":"backend","confidence":0.85},
+  {"id":"ck-wordpress","cookie":"wordpress_","tech":"WordPress","category":"cms","layer":"backend","confidence":0.85},
+  {"id":"ck-wp-settings","cookie":"wp-settings-","tech":"WordPress","category":"cms","layer":"backend","confidence":0.85},
+  {"id":"ck-wordpress-php","cookie":"wordpress_","tech":"PHP","category":"language","layer":"backend","confidence":0.85},
+  {"id":"ck-wp-settings-php","cookie":"wp-settings-","tech":"PHP","category":"language","layer":"backend","confidence":0.85}
+]

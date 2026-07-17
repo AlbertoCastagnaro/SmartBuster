@@ -61,6 +61,13 @@ func process(ctx context.Context, item WorkItem, client *httpclient.Client) Work
 		Reflected:   item.IsProbe && bytes.Contains(body, []byte(token)),
 		Elapsed:     elapsed,
 	}
+	if item.IsProbe {
+		// Calibration probes are few per directory (N_PROBES*len(exts));
+		// keeping the normalized text here (unlike ordinary candidates)
+		// lets Phase 2a's error-page tech signal reuse the baseline's
+		// representative sample instead of an extra request.
+		sig.NormBody = norm
+	}
 	return WorkResult{Item: item, Signature: sig}
 }
 

@@ -1,0 +1,14 @@
+[
+  {"id":"hdr-server-apache","header":"Server","pattern":"(?i)apache","tech":"Apache","category":"server","layer":"edge","confidence":0.7},
+  {"id":"hdr-server-nginx","header":"Server","pattern":"(?i)nginx","tech":"nginx","category":"server","layer":"edge","confidence":0.7},
+  {"id":"hdr-server-iis","header":"Server","pattern":"(?i)iis","tech":"IIS","category":"server","layer":"edge","confidence":0.7},
+  {"id":"hdr-server-cloudflare","header":"Server","pattern":"(?i)cloudflare","tech":"Cloudflare","category":"waf","layer":"edge","confidence":0.7},
+  {"id":"hdr-xpb-php","header":"X-Powered-By","pattern":"(?i)php","tech":"PHP","category":"language","layer":"backend","confidence":0.7},
+  {"id":"hdr-xpb-aspnet","header":"X-Powered-By","pattern":"(?i)asp\\.net","tech":"ASP.NET","category":"framework","layer":"backend","confidence":0.7},
+  {"id":"hdr-xaspnetver","header":"X-AspNet-Version","pattern":".+","tech":"ASP.NET","category":"framework","layer":"backend","confidence":0.7},
+  {"id":"hdr-xgenerator-drupal","header":"X-Generator","pattern":"(?i)drupal","tech":"Drupal","category":"cms","layer":"backend","confidence":0.7},
+  {"id":"hdr-xgenerator-wordpress","header":"X-Generator","pattern":"(?i)wordpress","tech":"WordPress","category":"cms","layer":"backend","confidence":0.7},
+  {"id":"hdr-xdrupalcache","header":"X-Drupal-Cache","pattern":".+","tech":"Drupal","category":"cms","layer":"backend","confidence":0.7},
+  {"id":"hdr-via","header":"Via","pattern":".+","tech":"Reverse Proxy","category":"proxy","layer":"edge","confidence":0.5},
+  {"id":"hdr-xservedby","header":"X-Served-By","pattern":".+","tech":"Reverse Proxy","category":"proxy","layer":"edge","confidence":0.5}
+]

@@ -1,0 +1,9 @@
+[
+  {"id":"html-wp-content","pattern":"/wp-content/","tech":"WordPress","category":"cms","layer":"backend","confidence":0.75},
+  {"id":"html-wp-includes","pattern":"/wp-includes/","tech":"WordPress","category":"cms","layer":"backend","confidence":0.75},
+  {"id":"html-wp-content-php","pattern":"/wp-content/","tech":"PHP","category":"language","layer":"backend","confidence":0.75},
+  {"id":"html-nextjs","pattern":"/_next/","tech":"Next.js","category":"framework","layer":"backend","confidence":0.75},
+  {"id":"html-drupal-files","pattern":"/sites/default/files/","tech":"Drupal","category":"cms","layer":"backend","confidence":0.75},
+  {"id":"html-joomla-media","pattern":"/media/jui/","tech":"Joomla","category":"cms","layer":"backend","confidence":0.75},
+  {"id":"html-meta-generator-wp","pattern":"<meta name=\"generator\" content=\"wordpress","tech":"WordPress","category":"cms","layer":"backend","confidence":0.75}
+]

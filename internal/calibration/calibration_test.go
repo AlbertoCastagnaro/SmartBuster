@@ -95,7 +95,7 @@ func TestCalibration_Hard404_NoFalsePositivesFullRecall(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(1))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 
 	for _, real := range fx.RealPaths {
 		sig := fetchSignature(t, client, fx.URL+real, real[1:])
@@ -121,7 +121,7 @@ func TestCalibration_Reflected404_NoFalsePositives(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(2))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 
 	for _, real := range fx.RealPaths {
 		sig := fetchSignature(t, client, fx.URL+real, real[1:])
@@ -144,7 +144,7 @@ func TestCalibration_Volatile404_NoFalsePositives(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(3))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 
 	for _, real := range fx.RealPaths {
 		sig := fetchSignature(t, client, fx.URL+real, real[1:])
@@ -167,7 +167,7 @@ func TestCalibration_WildcardDir_FlaggedAndChildrenSuppressed(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(4))
 
-	baseline := Calibrate("/files", genProbes(t, client, rng, fx.URL, "/files"))
+	baseline := Calibrate("/files", ExtSet, genProbes(t, client, rng, fx.URL, "/files"))
 	// A directory returning byte-identical content for every path (hamming
 	// distance 0) is indistinguishable, from per-directory probe shape alone,
 	// from an SPA shell: isSPA is checked first with the stricter threshold
@@ -194,7 +194,7 @@ func TestCalibration_SPA_DetectedNoHitFlood(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(5))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 	if !baseline.IsSPA {
 		t.Fatalf("expected SPA catch-all detected, got baseline %+v", baseline)
 	}
@@ -214,7 +214,7 @@ func TestCalibration_Redirect404_SuppressedAndRealFound(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(6))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 	if baseline.RepRedirect != "/login" {
 		t.Fatalf("expected baseline redirect target /login, got %q", baseline.RepRedirect)
 	}
@@ -240,7 +240,7 @@ func TestCalibration_Honest_FullRecall(t *testing.T) {
 	client := newTestClient()
 	rng := rand.New(rand.NewSource(7))
 
-	baseline := Calibrate("", genProbes(t, client, rng, fx.URL, ""))
+	baseline := Calibrate("", ExtSet, genProbes(t, client, rng, fx.URL, ""))
 
 	for _, real := range fx.RealPaths {
 		sig := fetchSignature(t, client, fx.URL+real, real[1:])
