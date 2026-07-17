@@ -183,16 +183,36 @@ func runScan(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// nmap can reveal additional web ports on a host already being scanned
+	// (spec §7 multi-port services); when it's in play, always use
+	// per-target subdirectories, since the queue below may grow past the
+	// targets the user actually typed.
+	multiOutputs := len(targets) > 1 || *nmapFile != "" || *runNmap
+
 	var allFindings []engine.Finding
-	for i, target := range targets {
+	visited := make(map[string]bool)
+	queue := append([]string(nil), targets...)
+	for i := 0; i < len(queue); i++ {
+		target := queue[i]
+		if visited[target] {
+			continue
+		}
+		visited[target] = true
+
 		dir := *outDir
-		if len(targets) > 1 {
+		if multiOutputs {
 			dir = filepath.Join(*outDir, sanitizeHost(target, i))
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				fatalf("output dir: %v", err)
 			}
 		}
-		allFindings = append(allFindings, scanOne(ctx, target, entries, cfg, sc, dir, wlHash)...)
+		findings, discovered := scanOne(ctx, target, entries, cfg, sc, dir, wlHash)
+		allFindings = append(allFindings, findings...)
+		for _, svc := range discovered {
+			if !visited[svc] {
+				queue = append(queue, svc)
+			}
+		}
 	}
 
 	fmt.Println()
@@ -235,7 +255,10 @@ func runDryRun(targets []string, entries []wordlist.Entry, sc *scope.Scope, seed
 	}
 }
 
-func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg engine.Config, sc *scope.Scope, outDir, wlHash string) []engine.Finding {
+// scanOne runs one scan and returns its findings plus any additional
+// same-host web service base URLs nmap revealed (spec §7); the caller
+// decides whether to queue those for their own scan.
+func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg engine.Config, sc *scope.Scope, outDir, wlHash string) ([]engine.Finding, []string) {
 	auditWriter, err := audit.New(filepath.Join(outDir, "audit.jsonl"))
 	if err != nil {
 		fatalf("audit log: %v", err)
@@ -290,7 +313,7 @@ func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg e
 	}); err != nil {
 		fatalf("results.txt: %v", err)
 	}
-	return findings
+	return findings, co.DiscoveredServices()
 }
 
 func writeResultFile(path string, write func(io.Writer) error) error {

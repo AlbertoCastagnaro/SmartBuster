@@ -3,5 +3,6 @@
   {"id":"err-aspnet-yellowscreen","pattern":"server error in.*application","tech":"ASP.NET","category":"framework","layer":"backend","confidence":0.85},
   {"id":"err-werkzeug","pattern":"werkzeug debugger","tech":"Flask","category":"framework","layer":"backend","confidence":0.85},
   {"id":"err-laravel-ignition","pattern":"laravel|ignition","tech":"Laravel","category":"framework","layer":"backend","confidence":0.85},
-  {"id":"err-apache-default404","pattern":"the requested url.*was not found on this server","tech":"Apache","category":"server","layer":"backend","confidence":0.6}
+  {"id":"err-apache-default404","pattern":"the requested url.*was not found on this server","tech":"Apache","category":"server","layer":"backend","confidence":0.6},
+  {"id":"err-php-fatal","pattern":"php (fatal error|warning|notice)","tech":"PHP","category":"language","layer":"backend","confidence":0.6}
 ]

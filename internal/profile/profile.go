@@ -59,6 +59,17 @@ func inScope(opts Options, rawURL string) bool {
 	return opts.InScope == nil || opts.InScope(rawURL)
 }
 
+// pace acquires one rate-limiter token before a profiling request, if the
+// caller wired one up (nil = unpaced, e.g. in tests that construct Options
+// directly). Every direct profiling request — root fetch, favicon, active
+// probes — goes through this, so scan-start doesn't burst ahead of
+// --rate.
+func pace(opts Options) {
+	if opts.Pace != nil {
+		opts.Pace()
+	}
+}
+
 // ProfileTarget builds the provisional TargetProfile for target: a real
 // root GET plus (if enabled) a favicon GET, and every signal that doesn't
 // need a calibration baseline (spec §3 steps 3.1, plus favicon from 3.2).
@@ -77,6 +88,7 @@ func ProfileTarget(ctx context.Context, client *httpclient.Client, target string
 	p.Services = append(p.Services, ServiceTarget{BaseURL: target})
 
 	if inScope(opts, target+"/") {
+		pace(opts)
 		if root, err := Fetch(ctx, client, target+"/"); err == nil {
 			applyHeaderSignals(p, opts.Ruleset, root.Header)
 			applyCookieSignals(p, opts.Ruleset, root.Cookies)
@@ -89,6 +101,7 @@ func ProfileTarget(ctx context.Context, client *httpclient.Client, target string
 	if opts.FaviconProbe {
 		favURL := target + "/favicon.ico"
 		if inScope(opts, favURL) {
+			pace(opts)
 			if fav, err := Fetch(ctx, client, favURL); err == nil {
 				applyFaviconSignal(p, opts.Ruleset, fav.Body)
 			}

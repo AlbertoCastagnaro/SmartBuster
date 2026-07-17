@@ -18,6 +18,46 @@ func testOpts(t *testing.T) Options {
 	return Options{Ruleset: rs, FaviconProbe: true}
 }
 
+// The root fetch and the favicon fetch must both be paced (not just active
+// probes) — otherwise scan-start bursts ahead of --rate.
+func TestProfileTarget_PacesRootAndFaviconFetches(t *testing.T) {
+	fx := fixtures.NewFaviconKnown() // serves both "/" and "/favicon.ico"
+	defer fx.Close()
+
+	var paceCalls int64
+	opts := testOpts(t)
+	opts.Pace = func() { atomic.AddInt64(&paceCalls, 1) }
+
+	client := httpclient.New(httpclient.Config{})
+	ProfileTarget(context.Background(), client, fx.URL, opts)
+
+	if got := atomic.LoadInt64(&paceCalls); got != 2 {
+		t.Fatalf("Pace() called %d times, want 2 (root + favicon)", got)
+	}
+}
+
+// spec §0 contract H: the scope enforcer gates the root fetch and the
+// favicon fetch just like any other request.
+func TestProfileTarget_OutOfScopeSendsNoRequests(t *testing.T) {
+	fx := fixtures.NewPHPApache()
+	defer fx.Close()
+
+	var paceCalls int64
+	opts := testOpts(t)
+	opts.InScope = func(string) bool { return false }
+	opts.Pace = func() { atomic.AddInt64(&paceCalls, 1) }
+
+	client := httpclient.New(httpclient.Config{})
+	p := ProfileTarget(context.Background(), client, fx.URL, opts)
+
+	if len(p.Tech) != 0 {
+		t.Fatalf("expected no tech detected when out of scope, got %+v", p.Tech)
+	}
+	if got := atomic.LoadInt64(&paceCalls); got != 0 {
+		t.Fatalf("Pace() called %d times, want 0 (nothing should have been paced/sent)", got)
+	}
+}
+
 // DoD §9 assertion 1: framework fixtures detect the correct backend tech at
 // high confidence, and ExtensionsForStack() returns the right set.
 func TestProfileTarget_PHPApache(t *testing.T) {

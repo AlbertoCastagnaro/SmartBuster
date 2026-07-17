@@ -135,3 +135,49 @@ func mustHost(t *testing.T, rawURL string) string {
 	}
 	return u.Hostname()
 }
+
+// Requested follow-up: if root refinement (error-page fingerprinting, which
+// only runs once the root baseline exists) discovers backend tech that
+// root calibration didn't know about, root should be re-calibrated with
+// the grown extension set rather than silently keeping the stale one.
+// This fixture's root ("/") carries no PHP signal at all — PHP is only
+// visible in the calibration probes' own 404 page.
+func TestCoordinator_RefinementGrowsExtensionSet_RecalibratesRoot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/admin" {
+			io.WriteString(w, "<html><body>Admin Panel</body></html>")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, "<html><body>PHP Warning:  include(): Failed opening '/var/www/inc.php' in /var/www/html/index.php on line 12</body></html>")
+	}))
+	defer srv.Close()
+
+	_, emitter, audit := runScan(t, srv.URL, []string{"admin", "backup"}, engine.Config{})
+
+	emitter.mu.Lock()
+	sawRecalibWarning := false
+	for _, ev := range emitter.events {
+		if ev.Type == engine.EventWarning && strings.Contains(ev.Message, "re-calibrating root") {
+			sawRecalibWarning = true
+		}
+	}
+	emitter.mu.Unlock()
+	if !sawRecalibWarning {
+		t.Fatal("expected a re-calibrating-root warning event after PHP was discovered post-calibration")
+	}
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	sawPHPProbe := false
+	for _, rec := range audit.records {
+		if rec.IsProbe && strings.HasSuffix(rec.URL, ".php") {
+			sawPHPProbe = true
+			break
+		}
+	}
+	if !sawPHPProbe {
+		t.Fatal("expected a .php calibration probe once root was re-calibrated with the grown extension set")
+	}
+}

@@ -43,9 +43,7 @@ func runActiveProbes(ctx context.Context, client *httpclient.Client, p *TargetPr
 		if !inScope(opts, probeURL) {
 			continue
 		}
-		if opts.Pace != nil {
-			opts.Pace()
-		}
+		pace(opts)
 		resp, err := Fetch(ctx, client, probeURL)
 		if err != nil {
 			continue

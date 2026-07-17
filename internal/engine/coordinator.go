@@ -121,6 +121,7 @@ type Coordinator struct {
 	wappalyzer   *profile.Wappalyzer
 	nmapSeeds    []profile.NmapSeed
 	runCtx       context.Context // set at Run() entry; finishCalibration's post-calibration refine needs it
+	rootRefined  bool            // RefineAfterCalibration has run for root; guards it to exactly once
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -490,11 +491,32 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 
 	// The root baseline is what the error-page signal and active-probe
 	// confirmation need (spec §4.6, §4.7); refine here rather than in
-	// profileTarget, which runs before this baseline exists.
-	if dir == "" && c.profileState != nil {
+	// profileTarget, which runs before this baseline exists. Guarded to
+	// run exactly once per scan (rootRefined): if refining grows the
+	// extension set (below) and root gets re-calibrated, this same
+	// function runs again for dir=="" — re-refining against a second
+	// baseline built from essentially the same evidence would just
+	// re-vote the same rules, artificially inflating confidence via
+	// noisy-OR fusion of a signal against itself.
+	if dir == "" && c.profileState != nil && !c.rootRefined {
+		c.rootRefined = true
 		c.profileState.IsSPA = baseline.IsSPA
 		profile.RefineAfterCalibration(c.runCtx, c.client, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
 		c.emitTechDetected()
+
+		// Refinement (error-page fingerprint, active-probe confirmation)
+		// can surface backend tech root calibration didn't know about yet,
+		// e.g. a PHP fingerprint only visible in the 404 page itself. If
+		// that grows the extension set, the just-built baseline was
+		// calibrated against too few extensions — re-run it once before
+		// any real candidates are dispatched (pushWordlistCandidates
+		// hasn't run yet at this point).
+		if newExts := c.profileState.ExtensionsForStack(); extSetGrew(c.extSet, newExts) {
+			c.extSet = newExts
+			c.emit(Event{Type: EventWarning, Dir: dir, Message: "profile refinement grew the extension set; re-calibrating root"})
+			c.startCalibration(dir, ds.depth, ds.branchStart)
+			return
+		}
 	}
 
 	c.pushWordlistCandidates(dir, ds)

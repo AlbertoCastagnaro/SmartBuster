@@ -27,6 +27,38 @@ func getSharedWappalyzer() *profile.Wappalyzer {
 
 const nmapSeedScore = 2.0 // above BasePrio's max of 1.0: nmap-confirmed paths jump the queue
 
+// extSetGrew reports whether newExts contains an extension absent from old
+// — the trigger for re-calibrating root after profile refinement.
+func extSetGrew(old, newExts []string) bool {
+	oldSet := make(map[string]bool, len(old))
+	for _, e := range old {
+		oldSet[e] = true
+	}
+	for _, e := range newExts {
+		if !oldSet[e] {
+			return true
+		}
+	}
+	return false
+}
+
+// DiscoveredServices returns same-host web service base URLs nmap revealed
+// beyond this coordinator's own target (spec §7) — e.g. an alternate HTTPS
+// port. The CLI uses this to auto-expand a scan across a host's other
+// in-scope ports; empty if profiling didn't run or nmap wasn't ingested.
+func (c *Coordinator) DiscoveredServices() []string {
+	if c.profileState == nil {
+		return nil
+	}
+	var out []string
+	for _, svc := range c.profileState.Services {
+		if svc.BaseURL != c.target {
+			out = append(out, svc.BaseURL)
+		}
+	}
+	return out
+}
+
 // profileOpts builds the profile.Options shared by ProfileTarget and
 // RefineAfterCalibration.
 func (c *Coordinator) profileOpts() profile.Options {
