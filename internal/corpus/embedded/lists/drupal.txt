@@ -1,0 +1,7 @@
+CHANGELOG.txt
+sites/default/settings.php
+core/install.php
+update.php
+user/login
+INSTALL.txt
+sites/default/files/index.php

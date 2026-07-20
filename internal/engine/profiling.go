@@ -86,6 +86,8 @@ func (c *Coordinator) profileTarget(ctx context.Context) {
 	c.profileState = profile.ProfileTarget(ctx, c.client, c.target, c.profileOpts())
 	c.extSet = c.profileState.ExtensionsForStack()
 	c.ingestNmap(ctx)
+	c.loadCorpusTemplate()
+	c.reprioritizeIfChanged() // spec §7(a): the provisional profile is finalized
 	c.emitTechDetected()
 }
 

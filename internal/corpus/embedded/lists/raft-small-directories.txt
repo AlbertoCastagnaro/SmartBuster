@@ -1,0 +1,14 @@
+admin
+login
+backup
+uploads
+images
+tmp
+old
+test
+config
+secure
+private
+hidden
+scripts
+downloads

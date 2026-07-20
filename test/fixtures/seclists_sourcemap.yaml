@@ -1,0 +1,6 @@
+# Source map for the synthetic test/fixtures/seclists tree (spec §9): one
+# freq-ranked list, one raft-dir list, one wordpress list, one backup list.
+directory-list-2.3-medium.txt:   { type: dir,  tags: [generic], freq_rank: true }
+raft-small-directories.txt:      { type: dir,  tags: [generic] }
+CMS/wordpress.txt:               { type: file, tags: [wordpress, php] }
+backup-files.txt:                { type: file, tags: [backup] }

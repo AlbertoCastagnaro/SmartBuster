@@ -1,0 +1,10 @@
+index.php
+info.php
+test.php
+config.php
+db.php
+connect.php
+admin.php
+login.php
+upload.php
+functions.php

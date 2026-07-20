@@ -1,0 +1,3 @@
+wp-login.php
+wp-config.php
+xmlrpc.php

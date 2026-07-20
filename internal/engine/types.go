@@ -17,11 +17,12 @@ const (
 type Candidate struct {
 	Path       string // relative to base, e.g. "admin" or "config.php"
 	Type       CandidateType
-	BasePrio   float64 // commonality prior (Phase 1: normalized wordlist rank)
+	BasePrio   float64 // commonality prior (Phase 1: normalized wordlist rank; Phase 2b: corpus weight)
 	Score      float64 // effective frontier priority
 	Depth      int
-	ParentDir  string // directory this lives under; "" = root
-	Provenance string // "wordlist" | "recursion:/admin" | ...
+	ParentDir  string   // directory this lives under; "" = root
+	Provenance string   // "wordlist" | "recursion:/admin" | "corpus:php+wordpress" | ...
+	Tags       []string // corpus tech tags (Phase 2b spec §0 contract D); nil/["generic"] for -w candidates
 }
 
 // ResponseSignature, Baseline, and Classification are defined in the leaf

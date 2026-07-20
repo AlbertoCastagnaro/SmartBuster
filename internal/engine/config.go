@@ -31,6 +31,15 @@ type Config struct {
 	RunNmap      bool     // --run-nmap: opt-in, shells out to nmap
 	ActiveProbes bool     // default false: passive-only unless asked
 	FaviconProbe bool     // default true: callers must set this explicitly
+
+	// Phase 2b corpus & selection (spec §8). Wordlist != "" bypasses the
+	// corpus entirely (spec §0 contract G): -w stays Phase 1 behavior.
+	CorpusDB     string  // path to prebuilt DB; "" = embedded minimal corpus
+	SecListsPath string  // for `corpus build`
+	SourceMap    string  // sourcemap.yaml; "" = embedded default
+	CorpusMax    int     // Select LIMIT; 0 = unbounded (medium corpus default)
+	TechBoostW   float64 // default 2.0
+	CorpusStream bool    // default false (Phase 7 perf)
 }
 
 const (

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/audit"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/corpus"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/engine"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/output"
@@ -35,6 +36,8 @@ func main() {
 		runScan(os.Args[2:])
 	case "ruleset":
 		runRuleset(os.Args[2:])
+	case "corpus":
+		runCorpus(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -45,8 +48,143 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: smartbuster scan <target> [<target>...] -w <wordlist> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: smartbuster scan <target> [<target>...] [-w <wordlist>] [flags]")
 	fmt.Fprintln(os.Stderr, "       smartbuster ruleset update --repo <url> --commit <ref> [--dest <dir>]")
+	fmt.Fprintln(os.Stderr, "       smartbuster corpus build --seclists <path> [--source-map <file>] [--out <db>]")
+	fmt.Fprintln(os.Stderr, "       smartbuster corpus import <file> --tags <a,b,...> --type dir|file [--db <path>]")
+}
+
+// defaultCorpusDBPath mirrors defaultSystemRulesetDir's convention: a
+// per-user config directory location `corpus build`/`corpus import` write
+// to by default when --out/--db isn't given.
+func defaultCorpusDBPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "smartbuster", "corpus.db")
+}
+
+func runCorpus(args []string) {
+	if len(args) == 0 {
+		usage()
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "build":
+		runCorpusBuild(args[1:])
+	case "import":
+		runCorpusImport(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "smartbuster corpus: unknown subcommand %q\n", args[0])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func runCorpusBuild(args []string) {
+	fs := flag.NewFlagSet("corpus build", flag.ExitOnError)
+	seclistsPath := fs.String("seclists", "", "path to a SecLists checkout (required)")
+	sourceMapPath := fs.String("source-map", "", "sourcemap.yaml; \"\" = bundled default (spec §3)")
+	out := fs.String("out", defaultCorpusDBPath(), "corpus DB file to write")
+	fs.Parse(args)
+
+	if *seclistsPath == "" || *out == "" {
+		fmt.Fprintln(os.Stderr, "usage: smartbuster corpus build --seclists <path> [--source-map <file>] [--out <db>]")
+		os.Exit(2)
+	}
+
+	var smData []byte
+	var sm *corpus.SourceMap
+	var err error
+	if *sourceMapPath != "" {
+		smData, err = os.ReadFile(*sourceMapPath)
+		if err != nil {
+			fatalf("corpus build: %v", err)
+		}
+		sm, err = corpus.ParseSourceMap(smData)
+	} else {
+		smData, err = corpus.DefaultSourceMapBytes()
+		if err != nil {
+			fatalf("corpus build: %v", err)
+		}
+		sm, err = corpus.ParseSourceMap(smData)
+	}
+	if err != nil {
+		fatalf("corpus build: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		fatalf("corpus build: %v", err)
+	}
+	db, err := corpus.Open(*out)
+	if err != nil {
+		fatalf("corpus build: %v", err)
+	}
+	defer db.Close()
+
+	result, err := corpus.Ingest(db, os.DirFS(*seclistsPath), *seclistsPath, sm, corpus.HashBytes(smData))
+	if err != nil {
+		fatalf("corpus build: %v", err)
+	}
+
+	fmt.Printf("corpus built at %s: %d terms from %d files", *out, result.Terms, result.Files)
+	if result.SecListsCommit != "" {
+		fmt.Printf(" (seclists commit %s)", result.SecListsCommit)
+	}
+	fmt.Println()
+}
+
+func runCorpusImport(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: smartbuster corpus import <file> --tags <a,b,...> --type dir|file [--db <path>]")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("corpus import", flag.ExitOnError)
+	var tags stringList
+	fs.Var(&tags, "tags", "tag to attach (repeatable, or comma-separated)")
+	typeStr := fs.String("type", "", "dir|file (required)")
+	dbPath := fs.String("db", defaultCorpusDBPath(), "corpus DB file to import into")
+	fs.Parse(args[1:])
+
+	file := args[0]
+	if file == "" || strings.HasPrefix(file, "-") || *typeStr == "" || *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "usage: smartbuster corpus import <file> --tags <a,b,...> --type dir|file [--db <path>]")
+		os.Exit(2)
+	}
+
+	var typ corpus.TermType
+	switch *typeStr {
+	case "dir":
+		typ = corpus.TypeDir
+	case "file":
+		typ = corpus.TypeFile
+	default:
+		fatalf("corpus import: --type must be dir or file, got %q", *typeStr)
+	}
+
+	var flatTags []string
+	for _, t := range tags {
+		flatTags = append(flatTags, strings.Split(t, ",")...)
+	}
+	if len(flatTags) == 0 {
+		fatalf("corpus import: --tags is required")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
+		fatalf("corpus import: %v", err)
+	}
+	db, err := corpus.Open(*dbPath)
+	if err != nil {
+		fatalf("corpus import: %v", err)
+	}
+	defer db.Close()
+
+	n, err := corpus.ImportUserList(db, file, flatTags, typ)
+	if err != nil {
+		fatalf("corpus import: %v", err)
+	}
+	fmt.Printf("imported %d terms from %s into %s (tags: %s)\n", n, file, *dbPath, strings.Join(flatTags, ","))
 }
 
 func runRuleset(args []string) {
@@ -111,7 +249,7 @@ func splitFlagsAndPositional(args []string, boolFlags map[string]bool) (flagArgs
 
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	wordlistPath := fs.String("w", "", "path to the wordlist file (required)")
+	wordlistPath := fs.String("w", "", "path to a flat wordlist file; bypasses the corpus and tags every entry \"generic\" (spec §0 contract G). \"\" = use the tagged corpus (default)")
 	concurrency := fs.Int("c", engine.DefaultConcurrency, "number of concurrent workers")
 	rate := fs.Float64("rate", 0, "max requests/sec across all workers; 0 = unbounded")
 	jitter := fs.Float64("jitter", httpclient.DefaultJitter, "fractional jitter applied to the pacing interval")
@@ -130,6 +268,10 @@ func runScan(args []string) {
 	activeProbes := fs.Bool("active-probes", false, "fire confirmer requests (e.g. /wp-login.php) for mid-confidence tech detections")
 	faviconProbe := fs.Bool("favicon-probe", true, "fetch /favicon.ico during target profiling")
 
+	corpusDB := fs.String("corpus-db", "", "path to a prebuilt corpus DB (see `smartbuster corpus build`); \"\" = embedded minimal corpus")
+	corpusMax := fs.Int("corpus-max", 0, "max candidates corpus.Select returns; 0 = unbounded")
+	techBoostW := fs.Float64("tech-boost-w", corpus.DefaultTechBoostW, "TECH_BOOST_W: how strongly detected tech boosts matching candidates")
+
 	var allowHosts, excludeHosts, excludePatterns stringList
 	fs.Var(&allowHosts, "allow-host", "additional in-scope host (repeatable); defaults to the target(s)' own host")
 	fs.Var(&excludeHosts, "exclude-host", "host to exclude from scope (repeatable)")
@@ -143,7 +285,7 @@ func runScan(args []string) {
 		"dry-run": true, "run-nmap": true, "active-probes": true, "favicon-probe": true,
 	})
 	fs.Parse(flagArgs)
-	if *wordlistPath == "" || len(targets) == 0 {
+	if len(targets) == 0 {
 		usage()
 		fs.PrintDefaults()
 		os.Exit(2)
@@ -152,13 +294,20 @@ func runScan(args []string) {
 		*seed = time.Now().UnixNano()
 	}
 
-	entries, err := wordlist.Load(*wordlistPath)
-	if err != nil {
-		fatalf("wordlist: %v", err)
-	}
-	wlHash, err := wordlist.Hash(*wordlistPath)
-	if err != nil {
-		fatalf("wordlist: %v", err)
+	// -w bypasses the corpus (spec §0 contract G); with no -w, entries stays
+	// empty and the coordinator seeds from the corpus instead.
+	var entries []wordlist.Entry
+	var wlHash string
+	if *wordlistPath != "" {
+		var err error
+		entries, err = wordlist.Load(*wordlistPath)
+		if err != nil {
+			fatalf("wordlist: %v", err)
+		}
+		wlHash, err = wordlist.Hash(*wordlistPath)
+		if err != nil {
+			fatalf("wordlist: %v", err)
+		}
 	}
 
 	sc := buildScope(targets, allowHosts, excludeHosts, excludePatterns)
@@ -169,10 +318,11 @@ func runScan(args []string) {
 		Seed: *seed, DryRun: *dryRun, OutDir: *outDir,
 		RulesetDir: *rulesetDir, UserRulesDir: *userRulesDir, RulesOff: rulesOff,
 		NmapFile: *nmapFile, RunNmap: *runNmap, ActiveProbes: *activeProbes, FaviconProbe: *faviconProbe,
+		CorpusDB: *corpusDB, CorpusMax: *corpusMax, TechBoostW: *techBoostW,
 	}
 
 	if *dryRun {
-		runDryRun(targets, entries, sc, *seed)
+		runDryRun(targets, entries, cfg, sc, *seed)
 		return
 	}
 
@@ -242,14 +392,22 @@ func buildScope(targets []string, allowHosts, excludeHosts, excludePatterns stri
 	return sc
 }
 
-func runDryRun(targets []string, entries []wordlist.Entry, sc *scope.Scope, seed int64) {
+func runDryRun(targets []string, entries []wordlist.Entry, cfg engine.Config, sc *scope.Scope, seed int64) {
 	for _, t := range targets {
 		t = strings.TrimRight(t, "/")
 		if !sc.InScope(t) {
 			fmt.Printf("[dry-run] refused (out of scope): %s\n", t)
 			continue
 		}
-		for _, u := range engine.PreviewRequests(t, entries, seed) {
+		urls := engine.PreviewRequests(t, entries, seed)
+		if len(entries) == 0 {
+			var err error
+			urls, err = engine.PreviewRequestsCorpus(t, cfg, seed)
+			if err != nil {
+				fatalf("dry-run: %v", err)
+			}
+		}
+		for _, u := range urls {
 			fmt.Printf("[dry-run] GET %s\n", u)
 		}
 	}

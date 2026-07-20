@@ -12,6 +12,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/calibration"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/corpus"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/profile"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
@@ -122,6 +123,12 @@ type Coordinator struct {
 	nmapSeeds    []profile.NmapSeed
 	runCtx       context.Context // set at Run() entry; finishCalibration's post-calibration refine needs it
 	rootRefined  bool            // RefineAfterCalibration has run for root; guards it to exactly once
+
+	// Phase 2b corpus & selection (spec §0 contract E/F/C). corpusTemplate
+	// is nil when -w was given (bypasses the corpus, spec contract G).
+	corpusTemplate []corpus.Candidate
+	techBoostW     float64
+	lastReprioSig  string // guards Reprioritize against thrashing on an unchanged profile (spec §7)
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -136,7 +143,10 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 	if !sc.InScope(target) {
 		return nil, fmt.Errorf("target %q is out of scope", target)
 	}
-	if len(wl) == 0 {
+	// A -w wordlist bypasses the corpus and must be non-empty (spec §0
+	// contract G); with no -w, an empty wl means "use the corpus" and is
+	// expected, not an error.
+	if cfg.Wordlist != "" && len(wl) == 0 {
 		return nil, fmt.Errorf("wordlist is empty")
 	}
 
@@ -169,6 +179,11 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		return nil, fmt.Errorf("load ruleset: %w", err)
 	}
 
+	techBoostW := cfg.TechBoostW
+	if techBoostW <= 0 {
+		techBoostW = corpus.DefaultTechBoostW
+	}
+
 	c := &Coordinator{
 		target:      target,
 		config:      cfg,
@@ -189,6 +204,7 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		extSet:      calibration.ExtSet,
 		ruleset:     ruleset,
 		wappalyzer:  getSharedWappalyzer(),
+		techBoostW:  techBoostW,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -502,6 +518,7 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 		c.rootRefined = true
 		c.profileState.IsSPA = baseline.IsSPA
 		profile.RefineAfterCalibration(c.runCtx, c.client, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
+		c.reprioritizeIfChanged() // spec §7(b): RefineAfterCalibration mutated the profile
 		c.emitTechDetected()
 
 		// Refinement (error-page fingerprint, active-probe confirmation)
@@ -519,14 +536,26 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 		}
 	}
 
+	c.pushCandidates(dir, ds)
+}
+
+// pushCandidates pushes dir's full candidate set once its baseline exists
+// (spec §9): the corpus (spec §0 contract E), unless -w was given, in which
+// case it falls back to the flat wordlist (spec §0 contract G).
+func (c *Coordinator) pushCandidates(dir string, ds *dirState) {
+	if c.corpusTemplate != nil {
+		c.pushCorpusCandidates(dir, ds)
+		return
+	}
 	c.pushWordlistCandidates(dir, ds)
 }
 
 // pushWordlistCandidates pushes the full wordlist for dir once its baseline
-// exists (spec §9). Phase 1 Score = BasePrio. Root additionally gets any
-// nmap-seeded paths (spec §7), scored above BasePrio's range so they're
-// tried first; they're TypeFullPath so isDirectory() never recurses into
-// them (Phase 2a doesn't attempt to map discovered nmap paths as dirs).
+// exists (spec §9, Phase 1 fallback path per spec §0 contract G). Phase 1
+// Score = BasePrio. Root additionally gets any nmap-seeded paths (spec §7),
+// scored above BasePrio's range so they're tried first; they're TypeFullPath
+// so isDirectory() never recurses into them (Phase 2a doesn't attempt to map
+// discovered nmap paths as dirs).
 func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 	ds.candidatesTotal = len(c.wordlist)
 	if dir == "" {
@@ -558,6 +587,7 @@ func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 			Type:       typ,
 			BasePrio:   entry.BasePrio,
 			Score:      entry.BasePrio,
+			Tags:       []string{"generic"},
 			Depth:      ds.depth + 1,
 			ParentDir:  dir,
 			Provenance: provenance,

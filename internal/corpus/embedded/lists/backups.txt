@@ -1,0 +1,10 @@
+backup.zip
+backup.sql
+backup.tar.gz
+db_backup.sql
+site_backup.zip
+config.bak
+database.sql
+dump.sql
+www.zip
+site.tar.gz

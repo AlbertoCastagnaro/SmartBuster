@@ -1,0 +1,17 @@
+# Source map for the embedded zero-setup corpus (spec §2): a small,
+# hand-curated raft-small-ish + CMS list set bundled directly in the
+# binary via embed.FS, so smartbuster works with no `corpus build` step.
+# `smartbuster corpus build` against a real SecLists checkout supersedes
+# this with the full corpus (see default_sourcemap.yaml).
+lists/directory-list-small.txt:   { type: dir,  tags: [generic], freq_rank: true }
+lists/raft-small-directories.txt: { type: dir,  tags: [generic] }
+lists/raft-small-files.txt:       { type: file, tags: [generic] }
+lists/wordpress.txt:              { type: file, tags: [wordpress, php] }
+lists/joomla.txt:                 { type: file, tags: [joomla, php] }
+lists/drupal.txt:                 { type: file, tags: [drupal, php] }
+lists/php.txt:                    { type: file, tags: [php] }
+lists/apache.txt:                 { type: dir,  tags: [apache] }
+lists/tomcat.txt:                 { type: dir,  tags: [tomcat, java] }
+lists/iis.txt:                    { type: file, tags: [iis, aspnet] }
+lists/backups.txt:                { type: file, tags: [backup] }
+lists/api.txt:                    { type: dir,  tags: [api] }

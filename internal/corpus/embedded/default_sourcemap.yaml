@@ -1,0 +1,16 @@
+# Default source map for `smartbuster corpus build` against a real SecLists
+# checkout (spec §3), used when the operator doesn't pass --source-map.
+# User-editable: copy this file, adjust, and pass --source-map <file>.
+Discovery/Web-Content/directory-list-2.3-medium.txt: { type: dir,  tags: [generic], freq_rank: true }
+Discovery/Web-Content/raft-*-directories*.txt:        { type: dir,  tags: [generic] }
+Discovery/Web-Content/raft-*-files*.txt:              { type: file, tags: [generic] }
+Discovery/Web-Content/CMS/wordpress*.txt:             { type: file, tags: [wordpress, php] }
+Discovery/Web-Content/CMS/Joomla*.txt:                { type: file, tags: [joomla, php] }
+Discovery/Web-Content/CMS/Drupal*.txt:                { type: file, tags: [drupal, php] }
+Discovery/Web-Content/*PHP*.txt:                      { type: file, tags: [php] }
+Discovery/Web-Content/apache*.txt:                    { type: dir,  tags: [apache] }
+Discovery/Web-Content/tomcat*.txt:                    { type: dir,  tags: [tomcat, java] }
+Discovery/Web-Content/IIS-*.txt:                      { type: file, tags: [iis, aspnet] }
+Discovery/Web-Content/Common-DB-Backups.txt:          { type: file, tags: [backup] }
+Discovery/Web-Content/backup-files.txt:               { type: file, tags: [backup] }
+Discovery/Web-Content/api/*.txt:                       { type: dir,  tags: [api] }

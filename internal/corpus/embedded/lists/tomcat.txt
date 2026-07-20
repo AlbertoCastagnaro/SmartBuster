@@ -1,0 +1,7 @@
+manager/html
+host-manager/html
+examples
+docs
+WEB-INF
+META-INF
+manager/status

@@ -1,0 +1,12 @@
+wp-login.php
+wp-config.php
+xmlrpc.php
+wp-cron.php
+wp-mail.php
+wp-signup.php
+wp-trackback.php
+wp-admin/admin-ajax.php
+wp-admin/install.php
+wp-content/debug.log
+wp-includes/version.php
+wp-json/wp/v2/users

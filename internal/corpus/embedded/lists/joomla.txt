@@ -1,0 +1,7 @@
+configuration.php
+administrator/index.php
+joomla.xml
+htaccess.txt
+libraries/joomla/factory.php
+templates/system/index.php
+components/com_users/users.php

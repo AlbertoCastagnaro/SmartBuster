@@ -1,0 +1,5 @@
+server-status
+server-info
+manual
+icons
+cgi-bin
