@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strings"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -60,6 +61,10 @@ func process(ctx context.Context, item WorkItem, client *httpclient.Client) Work
 		SetCookie:   resp.Header.Get("Set-Cookie") != "",
 		Reflected:   item.IsProbe && bytes.Contains(body, []byte(token)),
 		Elapsed:     elapsed,
+		// HasIndexOf is spec §3.1's open-directory-listing signal (Phase 3).
+		// norm is already computed for every response, so this costs one
+		// cheap substring scan — unlike NormBody, it doesn't retain the body.
+		HasIndexOf: strings.Contains(norm, "index of"),
 	}
 	if item.IsProbe {
 		// Calibration probes are few per directory (N_PROBES*len(exts));

@@ -59,6 +59,11 @@ type dirState struct {
 
 	recentHits    []bool
 	recentElapsed []time.Duration
+
+	// knownPaths dedupes Phase 3 generated candidates (spec §3.2, §6)
+	// against whatever's already known for this directory — the initial
+	// template push, plus anything already generated.
+	knownPaths map[string]bool
 }
 
 type wafSample struct {
@@ -129,6 +134,28 @@ type Coordinator struct {
 	corpusTemplate []corpus.Candidate
 	techBoostW     float64
 	lastReprioSig  string // guards Reprioritize against thrashing on an unchanged profile (spec §7)
+
+	// Phase 3 dynamic scoring (spec §0 contract B onward). scorer is built
+	// once profileState exists (profileTarget); every other field here is
+	// resolved from Config at construction time (see NewCoordinator).
+	scorer           *DynamicScorer
+	scoreWeights     ScoreWeights
+	markovOrder      int
+	markovMinSamples int
+	learnMinConf     float64
+	subtreeBurst     int
+	epsilon          float64
+	epsilonRNG       *rand.Rand
+	reprioHits       int
+	reprioInterval   time.Duration
+
+	scorerDirty     bool      // spec §6: set by a qualifying discovery, cleared by runDynamicReprio
+	hitsSinceReprio int       // spec §6: REPRIO_INTERVAL's hit-count half
+	lastDynReprio   time.Time // spec §6: REPRIO_INTERVAL's elapsed-time half
+	dynReprioCount  int       // test/diagnostic only: how many times runDynamicReprio actually swept the frontier
+
+	lastDispatchDir string // spec §4: subtree yield cap's consecutive-dispatch tracking
+	dispatchStreak  int
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -184,6 +211,40 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		techBoostW = corpus.DefaultTechBoostW
 	}
 
+	// Phase 3 (spec §7): every field here follows this Config's usual
+	// "<=0 means apply the default" convention, EXCEPT Weights.WSem/
+	// WAssoc/WConv and Epsilon — those are used exactly as given, since 0
+	// is itself a meaningful value ("this signal off" / "pure greedy"),
+	// matching how Rate/Jitter/TimePerBranch already work. WTech is set
+	// here purely for reporting parity (spec §10 handoff); Boost never
+	// reads it.
+	weights := cfg.Weights
+	weights.WTech = techBoostW
+	markovOrder := cfg.MarkovOrder
+	if markovOrder <= 0 {
+		markovOrder = DefaultMarkovOrder
+	}
+	markovMinSamples := cfg.MarkovMinSamples
+	if markovMinSamples <= 0 {
+		markovMinSamples = DefaultMarkovMinSamples
+	}
+	learnMinConf := cfg.LearnMinConf
+	if learnMinConf <= 0 {
+		learnMinConf = DefaultLearnMinConf
+	}
+	subtreeBurst := cfg.SubtreeBurst
+	if subtreeBurst <= 0 {
+		subtreeBurst = DefaultSubtreeBurst
+	}
+	reprioHits := cfg.ReprioHits
+	if reprioHits <= 0 {
+		reprioHits = DefaultReprioHits
+	}
+	reprioInterval := cfg.ReprioInterval
+	if reprioInterval <= 0 {
+		reprioInterval = DefaultReprioInterval
+	}
+
 	c := &Coordinator{
 		target:      target,
 		config:      cfg,
@@ -205,6 +266,16 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		ruleset:     ruleset,
 		wappalyzer:  getSharedWappalyzer(),
 		techBoostW:  techBoostW,
+
+		scoreWeights:     weights,
+		markovOrder:      markovOrder,
+		markovMinSamples: markovMinSamples,
+		learnMinConf:     learnMinConf,
+		subtreeBurst:     subtreeBurst,
+		epsilon:          cfg.Epsilon,
+		epsilonRNG:       dirRand(cfg.Seed, "\x00__epsilon__"),
+		reprioHits:       reprioHits,
+		reprioInterval:   reprioInterval,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -356,8 +427,18 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 	// already produced; wildcardSuspect is checked only in withinLimits,
 	// since spec §10 says a wildcard-suspect branch stops being recursed
 	// into but its own wordlist scan keeps running.
-	for !c.frontier.Empty() {
-		cand := c.frontier.Pop()
+	// held collects candidates from a directory currently over its spec §4
+	// subtree yield cap: they're still valid and dispatchable, just
+	// deferred one round so a different directory gets a turn first. They
+	// are pushed back before this function returns via any path (found a
+	// different dir to dispatch; served one from held anyway because
+	// nothing else was left; or the frontier is simply empty).
+	var held []Candidate
+	for {
+		cand, ok := c.popNext()
+		if !ok {
+			break
+		}
 		ds := c.dirs[cand.ParentDir]
 		if ds == nil || ds.state != dirScanning {
 			continue
@@ -373,6 +454,31 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 			c.maybeFinishDir(ds)
 			continue
 		}
+		if c.subtreeBurst > 0 && cand.ParentDir == c.lastDispatchDir && c.dispatchStreak >= c.subtreeBurst {
+			held = append(held, cand)
+			continue
+		}
+
+		c.recordDispatch(cand.ParentDir)
+		ds.requestsDispatched++
+		for _, h := range held {
+			c.frontier.Push(h)
+		}
+		return WorkItem{Candidate: cand, URL: url}, true
+	}
+
+	// Frontier exhausted without finding a different directory to
+	// round-robin to: every remaining candidate belongs to the throttled
+	// dir, so serve one anyway rather than stalling — there's nothing else
+	// to switch to.
+	if len(held) > 0 {
+		cand := held[0]
+		for _, h := range held[1:] {
+			c.frontier.Push(h)
+		}
+		ds := c.dirs[cand.ParentDir]
+		url := c.target + cand.ParentDir + "/" + cand.Path
+		c.recordDispatch(cand.ParentDir)
 		ds.requestsDispatched++
 		return WorkItem{Candidate: cand, URL: url}, true
 	}
@@ -577,25 +683,29 @@ func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 	if dir != "" {
 		provenance = "recursion:" + dir
 	}
+	ds.knownPaths = make(map[string]bool, len(c.wordlist))
 	for _, entry := range c.wordlist {
 		typ := TypeDir
 		if entry.Type == wordlist.EntryFile {
 			typ = TypeFile
 		}
-		c.frontier.Push(Candidate{
+		cand := Candidate{
 			Path:       entry.Word,
 			Type:       typ,
 			BasePrio:   entry.BasePrio,
-			Score:      entry.BasePrio,
 			Tags:       []string{"generic"},
 			Depth:      ds.depth + 1,
 			ParentDir:  dir,
 			Provenance: provenance,
-		})
+		}
+		cand.Score = c.scoreCandidate(cand)
+		ds.knownPaths[entry.Word] = true
+		c.frontier.Push(cand)
 	}
 
 	if dir == "" {
 		for _, seed := range c.nmapSeeds {
+			ds.knownPaths[seed.Path] = true
 			c.frontier.Push(Candidate{
 				Path:       seed.Path,
 				Type:       TypeFullPath,
@@ -687,6 +797,8 @@ func (c *Coordinator) handleHit(res WorkResult, cls Classification, dir string) 
 		ContentHash: hash,
 	})
 	c.emit(Event{Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence})
+
+	c.learnFromHit(res, cls, dir) // spec §5: dirCtx + markov + assoc, confidence-gated (dynamic.go)
 
 	if isDirectory(res) && cls.Confidence >= RecurseMinConf && c.withinLimits(res, dir) {
 		childDir := dir + "/" + res.Item.Candidate.Path

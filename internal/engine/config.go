@@ -40,6 +40,30 @@ type Config struct {
 	CorpusMax    int     // Select LIMIT; 0 = unbounded (medium corpus default)
 	TechBoostW   float64 // default 2.0
 	CorpusStream bool    // default false (Phase 7 perf)
+
+	// Phase 3 dynamic scoring (spec §7). Weights.WSem/WAssoc/WConv and
+	// Epsilon are used exactly as given (0 is a real, meaningful value —
+	// "this signal off" / "pure greedy" — not "apply the default"), matching
+	// how Rate/Jitter/TimePerBranch already work above; every other field
+	// here follows the rest of this Config's "<=0 means apply the default"
+	// convention. Weights.WTech is set from TechBoostW for reporting
+	// parity (spec §10 handoff) — corpus.Score already applies TechBoostW
+	// on its own, so DynamicScorer.Boost never reads WTech itself.
+	Weights          ScoreWeights
+	MarkovOrder      int           // default 3
+	MarkovMinSamples int           // default 8
+	LearnMinConf     float64       // default 0.8; gate for feeding the Phase 3 learners (spec §5)
+	SubtreeBurst     int           // default 200; consecutive reqs per dir before round-robin (spec §4)
+	Epsilon          float64       // default 0.05; ε-greedy explore probability; 0 = pure greedy (spec §4)
+	ReprioHits       int           // default 25; reprioritize after this many qualifying hits (spec §6)
+	ReprioInterval   time.Duration // default 500ms; or after this much elapsed time, whichever first (spec §6)
+}
+
+// ScoreWeights are the Phase 3 dynamic-signal weights (spec §7): Boost
+// multiplies (1 + Wx*signal) per signal. WTech mirrors the static prior's
+// TECH_BOOST_W for reporting; it is not itself read by Boost.
+type ScoreWeights struct {
+	WTech, WSem, WAssoc, WConv float64
 }
 
 const (
@@ -52,4 +76,19 @@ const (
 
 	BackoffFactor = 4.0
 	BackoffWindow = 30 * time.Second
+
+	// Phase 3 defaults (spec §7).
+	DefaultWSem   = 1.5
+	DefaultWAssoc = 1.0
+	DefaultWConv  = 0.8
+
+	DefaultMarkovOrder      = 3
+	DefaultMarkovMinSamples = 8
+	DefaultLearnMinConf     = 0.8
+	DefaultSubtreeBurst     = 200
+	DefaultEpsilon          = 0.05
+	DefaultReprioHits       = 25
+	DefaultReprioInterval   = 500 * time.Millisecond
+
+	GenSiblingBound = 5 // spec §7: bound on generated sibling/sequence candidates per hit
 )

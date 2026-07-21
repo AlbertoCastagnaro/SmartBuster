@@ -272,6 +272,17 @@ func runScan(args []string) {
 	corpusMax := fs.Int("corpus-max", 0, "max candidates corpus.Select returns; 0 = unbounded")
 	techBoostW := fs.Float64("tech-boost-w", corpus.DefaultTechBoostW, "TECH_BOOST_W: how strongly detected tech boosts matching candidates")
 
+	wSem := fs.Float64("w-sem", engine.DefaultWSem, "WSem: response-semantics signal weight (spec §7)")
+	wAssoc := fs.Float64("w-assoc", engine.DefaultWAssoc, "WAssoc: association/companion signal weight (spec §7)")
+	wConv := fs.Float64("w-conv", engine.DefaultWConv, "WConv: naming-convention (Markov) signal weight (spec §7)")
+	markovOrder := fs.Int("markov-order", engine.DefaultMarkovOrder, "MARKOV_ORDER: naming-convention model's char n-gram order")
+	markovMinSamples := fs.Int("markov-min-samples", engine.DefaultMarkovMinSamples, "MARKOV_MIN_SAMPLES: cold-start threshold before the naming-convention signal activates")
+	learnMinConf := fs.Float64("learn-min-conf", engine.DefaultLearnMinConf, "LEARN_MIN_CONF: min confidence for a hit to feed the dynamic learners (poisoning defense)")
+	subtreeBurst := fs.Int("subtree-burst", engine.DefaultSubtreeBurst, "SUBTREE_BURST: consecutive requests a directory may run before yielding to another")
+	epsilon := fs.Float64("epsilon", engine.DefaultEpsilon, "EPSILON: ε-greedy exploration probability; 0 = pure greedy (e.g. stealth modes)")
+	reprioHits := fs.Int("reprio-hits", engine.DefaultReprioHits, "REPRIO_INTERVAL: reprioritize the frontier after this many qualifying hits")
+	reprioInterval := fs.Duration("reprio-interval", engine.DefaultReprioInterval, "REPRIO_INTERVAL: or after this much elapsed time, whichever first")
+
 	var allowHosts, excludeHosts, excludePatterns stringList
 	fs.Var(&allowHosts, "allow-host", "additional in-scope host (repeatable); defaults to the target(s)' own host")
 	fs.Var(&excludeHosts, "exclude-host", "host to exclude from scope (repeatable)")
@@ -319,6 +330,14 @@ func runScan(args []string) {
 		RulesetDir: *rulesetDir, UserRulesDir: *userRulesDir, RulesOff: rulesOff,
 		NmapFile: *nmapFile, RunNmap: *runNmap, ActiveProbes: *activeProbes, FaviconProbe: *faviconProbe,
 		CorpusDB: *corpusDB, CorpusMax: *corpusMax, TechBoostW: *techBoostW,
+		Weights:          engine.ScoreWeights{WSem: *wSem, WAssoc: *wAssoc, WConv: *wConv},
+		MarkovOrder:      *markovOrder,
+		MarkovMinSamples: *markovMinSamples,
+		LearnMinConf:     *learnMinConf,
+		SubtreeBurst:     *subtreeBurst,
+		Epsilon:          *epsilon,
+		ReprioHits:       *reprioHits,
+		ReprioInterval:   *reprioInterval,
 	}
 
 	if *dryRun {

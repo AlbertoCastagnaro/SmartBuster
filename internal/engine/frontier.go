@@ -1,6 +1,10 @@
 package engine
 
-import "container/heap"
+import (
+	"container/heap"
+	"math/rand"
+	"sort"
+)
 
 // Frontier is a max-heap of Candidates ordered by Score (highest first).
 // Phase 1 Score = BasePrio; Reprioritize is the hook later signal sources
@@ -40,6 +44,32 @@ func (f *Frontier) Reprioritize(fn func(*Candidate)) {
 		fn(&f.items[i])
 	}
 	heap.Init(&f.items)
+}
+
+// SampleMidTier removes and returns a candidate sampled uniformly from the
+// frontier's middle third by Score (spec §4's ε-greedy exploration): pure
+// greedy descent always takes the max, which can tunnel-vision into one
+// branch, so this gives the coordinator a way to occasionally pick
+// something else instead. ok is false only if the frontier is empty.
+func (f *Frontier) SampleMidTier(rng *rand.Rand) (Candidate, bool) {
+	n := len(f.items)
+	if n == 0 {
+		return Candidate{}, false
+	}
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return f.items[order[i]].Score > f.items[order[j]].Score })
+
+	lo, hi := n/3, (2*n)/3
+	if hi <= lo {
+		lo, hi = 0, n
+	}
+	idx := order[lo+rng.Intn(hi-lo)]
+	c := f.items[idx]
+	heap.Remove(&f.items, idx)
+	return c, true
 }
 
 type candidateHeap []Candidate

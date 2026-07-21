@@ -85,6 +85,10 @@ func (c *Coordinator) paceProfileRequest() {
 func (c *Coordinator) profileTarget(ctx context.Context) {
 	c.profileState = profile.ProfileTarget(ctx, c.client, c.target, c.profileOpts())
 	c.extSet = c.profileState.ExtensionsForStack()
+	// Phase 3 (spec §0 contract B): the dynamic layer binds to the same
+	// profileState pointer RefineAfterCalibration mutates in place below,
+	// so it stays valid without re-wiring for the rest of the scan.
+	c.scorer = NewDynamicScorer(c.profileState, c.scoreWeights, c.markovOrder, c.markovMinSamples)
 	c.ingestNmap(ctx)
 	c.loadCorpusTemplate()
 	c.reprioritizeIfChanged() // spec §7(a): the provisional profile is finalized

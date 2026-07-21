@@ -122,21 +122,25 @@ func (c *Coordinator) pushCorpusCandidates(dir string, ds *dirState) {
 		}
 	}
 
+	ds.knownPaths = make(map[string]bool, len(c.corpusTemplate))
 	for _, tc := range c.corpusTemplate {
-		c.frontier.Push(Candidate{
+		cand := Candidate{
 			Path:       tc.Path,
 			Type:       CandidateType(tc.Type), // corpus.TermType shares engine.CandidateType's int encoding (spec §2 DDL comment)
 			BasePrio:   tc.BasePrio,
-			Score:      corpus.Score(tc.BasePrio, tc.Tags, c.profileState, c.techBoostW),
 			Tags:       tc.Tags,
 			Depth:      ds.depth + 1,
 			ParentDir:  dir,
 			Provenance: tc.Provenance,
-		})
+		}
+		cand.Score = c.scoreCandidate(cand)
+		ds.knownPaths[tc.Path] = true
+		c.frontier.Push(cand)
 	}
 
 	if dir == "" {
 		for _, seed := range c.nmapSeeds {
+			ds.knownPaths[seed.Path] = true
 			c.frontier.Push(Candidate{
 				Path:       seed.Path,
 				Type:       TypeFullPath,
@@ -150,18 +154,36 @@ func (c *Coordinator) pushCorpusCandidates(dir string, ds *dirState) {
 	}
 }
 
-// applyMatchScore is the Frontier.Reprioritize callback (spec §7): it
-// recomputes Score with the shared corpus.Score formula against the
-// coordinator's current profile state, so resident candidates re-rank
-// after profile refinement without needing a second Select().
-func (c *Coordinator) applyMatchScore(cand *Candidate) {
-	cand.Score = corpus.Score(cand.BasePrio, cand.Tags, c.profileState, c.techBoostW)
+// scoreCandidate is spec §0 contract B's final-score formula: the static
+// prior (corpus.Score) times the Phase 3 dynamic layer's multiplicative
+// Boost. cand must already have ParentDir/Tags/Path set — Boost reads them.
+// c.scorer is nil only before profileTarget has run, which is earlier than
+// any candidate is ever scored, but the nil check keeps this safe to call
+// unconditionally from any push path.
+func (c *Coordinator) scoreCandidate(cand Candidate) float64 {
+	score := corpus.Score(cand.BasePrio, cand.Tags, c.profileState, c.techBoostW)
+	if c.scorer != nil {
+		score *= c.scorer.Boost(&cand)
+	}
+	return score
 }
 
-// reprioritizeIfChanged fires Frontier.Reprioritize(applyMatchScore) at
-// spec §7's two trigger points — once the provisional profile is
-// finalized, and whenever RefineAfterCalibration mutates it — guarded
-// against thrash so an unchanged profile is a no-op (spec §7).
+// applyScore is the Frontier.Reprioritize callback (spec §0 contract B,
+// renamed from 2b's applyMatchScore): recomputes Score as the static prior
+// times the current dynamic Boost, so resident candidates re-rank after
+// profile refinement or a qualifying discovery without needing a second
+// Select().
+func (c *Coordinator) applyScore(cand *Candidate) {
+	cand.Score = c.scoreCandidate(*cand)
+}
+
+// reprioritizeIfChanged fires Frontier.Reprioritize(applyScore) at spec §7's
+// profile-change trigger — once the provisional profile is finalized, and
+// whenever RefineAfterCalibration mutates it — guarded against thrash so an
+// unchanged profile is a no-op. This is unthrottled (profile changes happen
+// at most a couple of times per scan); the dynamic-context-dirty trigger
+// (spec §6, markScorerDirty/runDynamicReprio in dynamic.go) is the one that
+// needs throttling.
 func (c *Coordinator) reprioritizeIfChanged() {
 	if c.profileState == nil {
 		return
@@ -171,7 +193,7 @@ func (c *Coordinator) reprioritizeIfChanged() {
 		return
 	}
 	c.lastReprioSig = sig
-	c.frontier.Reprioritize(c.applyMatchScore)
+	c.frontier.Reprioritize(c.applyScore)
 }
 
 // profileSignature is a deterministic summary of p's detected techs and

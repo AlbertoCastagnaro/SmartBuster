@@ -1,0 +1,9 @@
+# Hand-curated companion groups (spec §3.2): a confirmed hit anywhere in a
+# group boosts every other frontier candidate in the same group, in the same
+# directory. Small and deliberately editorial — this ships like the
+# ruleset's embedded rule files, not a data-mined table (see AssocEngine's
+# LoadMinedTable for the future drop-in).
+groups:
+  - [login.php, config.php, db.php, admin.php]
+  - [index, home, default]
+  - [users, user, accounts]

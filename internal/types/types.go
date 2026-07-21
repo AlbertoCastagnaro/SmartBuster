@@ -36,6 +36,12 @@ type ResponseSignature struct {
 	// why). Left empty for ordinary candidate responses so the hot path
 	// stays exactly as compact as Phase 1 designed it.
 	NormBody string
+
+	// HasIndexOf is a cheap boolean over the normalized body (spec §3.1's
+	// open-directory-listing signal), computed for every response — unlike
+	// NormBody it costs nothing to keep on the hot path since it doesn't
+	// retain the body text itself.
+	HasIndexOf bool
 }
 
 // Baseline: learned "not found" profile for one directory.
