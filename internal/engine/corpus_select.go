@@ -106,23 +106,10 @@ func (c *Coordinator) openCorpusDB() (*sql.DB, error) {
 // state at push time. Root additionally gets any nmap-seeded paths (spec
 // §7 of Phase 2a), exactly as pushWordlistCandidates does.
 func (c *Coordinator) pushCorpusCandidates(dir string, ds *dirState) {
-	ds.candidatesTotal = len(c.corpusTemplate)
-	if dir == "" {
-		ds.candidatesTotal += len(c.nmapSeeds)
-	}
-	if ds.candidatesTotal == 0 {
-		ds.state = dirDone
-		return
-	}
-	ds.budget = ds.candidatesTotal
-	if c.config.PerDirBudget > 0 {
-		ds.budget = c.config.PerDirBudget
-		if dir == "" {
-			ds.budget += len(c.nmapSeeds)
-		}
-	}
+	pending := ds.pendingSeeds
+	ds.pendingSeeds = nil
 
-	ds.knownPaths = make(map[string]bool, len(c.corpusTemplate))
+	ds.knownPaths = make(map[string]bool, len(c.corpusTemplate)+len(pending))
 	for _, tc := range c.corpusTemplate {
 		cand := Candidate{
 			Path:       tc.Path,
@@ -133,22 +120,48 @@ func (c *Coordinator) pushCorpusCandidates(dir string, ds *dirState) {
 			ParentDir:  dir,
 			Provenance: tc.Provenance,
 		}
+		mergeSeedCandidate(pending, &cand) // spec §3: a seed at this path upgrades it in place (max prio, unioned provenance)
 		cand.Score = c.scoreCandidate(cand)
 		ds.knownPaths[tc.Path] = true
 		c.frontier.Push(cand)
 	}
+	// Whatever's left in pending after the loop above didn't match any
+	// template entry — a genuinely new path the seed named (the deep-seed
+	// case, spec §4).
+	leftoverSeeds := len(pending)
+	for path, cand := range pending {
+		cand.Score = c.scoreCandidate(cand)
+		ds.knownPaths[path] = true
+		c.frontier.Push(cand)
+	}
+
+	ds.candidatesTotal = len(c.corpusTemplate) + leftoverSeeds
+	if dir == "" {
+		ds.candidatesTotal += len(c.nmapSeeds)
+	}
+	if ds.candidatesTotal == 0 {
+		ds.state = dirDone
+		return
+	}
+	ds.budget = ds.candidatesTotal
+	if c.config.PerDirBudget > 0 {
+		ds.budget = c.config.PerDirBudget + leftoverSeeds
+		if dir == "" {
+			ds.budget += len(c.nmapSeeds)
+		}
+	}
 
 	if dir == "" {
-		for _, seed := range c.nmapSeeds {
-			ds.knownPaths[seed.Path] = true
+		for _, ns := range c.nmapSeeds {
+			ds.knownPaths[ns.Path] = true
 			c.frontier.Push(Candidate{
-				Path:       seed.Path,
+				Path:       ns.Path,
 				Type:       TypeFullPath,
 				BasePrio:   1.0,
 				Score:      nmapSeedScore,
 				Depth:      ds.depth + 1,
 				ParentDir:  dir,
-				Provenance: seed.Provenance,
+				Provenance: ns.Provenance,
 			})
 		}
 	}

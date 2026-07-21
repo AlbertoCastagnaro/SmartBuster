@@ -57,6 +57,18 @@ type Config struct {
 	Epsilon          float64       // default 0.05; ε-greedy explore probability; 0 = pure greedy (spec §4)
 	ReprioHits       int           // default 25; reprioritize after this many qualifying hits (spec §6)
 	ReprioInterval   time.Duration // default 500ms; or after this much elapsed time, whichever first (spec §6)
+
+	// Phase 4a passive seeding (spec §6). Robots/Sitemap default true
+	// (cheap, on-target, high-signal); Wayback defaults false (an
+	// off-target network call that pulls thousands of rows) — like
+	// FaviconProbe, these are bools so callers must set them explicitly;
+	// there's no "<=0 means default" for a bool.
+	Robots     bool
+	Sitemap    bool
+	Wayback    bool
+	WaybackMax int    // 0 = seed.WaybackMaxDefault
+	SeedAssets bool   // --seed-assets: keep static-asset noise from Wayback seeds
+	WaybackURL string // CDX endpoint override; "" = seed.CDXBaseURL (real archive.org). Lets tests point at a stub.
 }
 
 // ScoreWeights are the Phase 3 dynamic-signal weights (spec §7): Boost

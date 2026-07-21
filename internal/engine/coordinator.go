@@ -16,6 +16,7 @@ import (
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/profile"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/seed"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/wordlist"
 )
 
@@ -64,6 +65,14 @@ type dirState struct {
 	// against whatever's already known for this directory — the initial
 	// template push, plus anything already generated.
 	knownPaths map[string]bool
+
+	// pendingSeeds holds Phase 4a seed candidates for this directory that
+	// arrived before its baseline existed (spec §4: a deep seed's ancestor
+	// chain is materialized eagerly, before its own calibration completes,
+	// via ensureDirChain) — the only place they can land, since pushCandidates
+	// hasn't built ds.knownPaths yet. Folded into the candidate set
+	// pushCandidates builds once calibration finishes.
+	pendingSeeds map[string]Candidate
 }
 
 type wafSample struct {
@@ -156,6 +165,12 @@ type Coordinator struct {
 
 	lastDispatchDir string // spec §4: subtree yield cap's consecutive-dispatch tracking
 	dispatchStreak  int
+
+	// Phase 4a passive seeding (spec §0 contract E, §5.3). archivePacer is a
+	// polite limiter for archive.org — deliberately separate from c.pacer,
+	// which paces requests to the *target* (spec §5.3: the target's own
+	// rate/stealth settings have nothing to do with a third-party host).
+	archivePacer *httpclient.Pacer
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -194,6 +209,12 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 	limiter := httpclient.NewLimiter(cfg.Rate, cfg.Jitter)
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	pacer := httpclient.NewPacer(limiter, rng)
+
+	// Phase 4a (spec §5.3): archive.org gets its own polite limiter,
+	// independent of cfg.Rate/cfg.Jitter — those govern the target, not a
+	// third-party host.
+	archiveLimiter := httpclient.NewLimiter(seed.ArchiveRateDefault, httpclient.DefaultJitter)
+	archivePacer := httpclient.NewPacer(archiveLimiter, dirRand(cfg.Seed, "\x00__archive__"))
 
 	rulesOff := cfg.RulesOff
 	if rulesOff == nil {
@@ -276,6 +297,8 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		epsilonRNG:       dirRand(cfg.Seed, "\x00__epsilon__"),
 		reprioHits:       reprioHits,
 		reprioInterval:   reprioInterval,
+
+		archivePacer: archivePacer,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -319,6 +342,7 @@ func (c *Coordinator) Run(ctx context.Context) {
 	c.emit(Event{Type: EventScanStarted, URL: c.target})
 	c.profileTarget(ctx) // spec §0 contract B: before any real dispatch
 	c.seedRoot()
+	c.seedPassive(ctx) // Phase 4a: robots/sitemap/wayback (spec §2) — root already exists, so pendingSeeds has somewhere to land
 
 	var wg sync.WaitGroup
 	for i := 0; i < c.config.Concurrency; i++ {
@@ -334,6 +358,7 @@ func (c *Coordinator) Run(ctx context.Context) {
 	close(c.workCh)
 	wg.Wait()
 	c.pacer.Stop()
+	c.archivePacer.Stop()
 }
 
 func (c *Coordinator) dispatchLoop(ctx context.Context) {
@@ -663,27 +688,14 @@ func (c *Coordinator) pushCandidates(dir string, ds *dirState) {
 // so isDirectory() never recurses into them (Phase 2a doesn't attempt to map
 // discovered nmap paths as dirs).
 func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
-	ds.candidatesTotal = len(c.wordlist)
-	if dir == "" {
-		ds.candidatesTotal += len(c.nmapSeeds)
-	}
-	if ds.candidatesTotal == 0 {
-		ds.state = dirDone
-		return
-	}
-	ds.budget = ds.candidatesTotal // PER_DIR_BUDGET default = wordlist size
-	if c.config.PerDirBudget > 0 {
-		ds.budget = c.config.PerDirBudget
-		if dir == "" {
-			ds.budget += len(c.nmapSeeds)
-		}
-	}
+	pending := ds.pendingSeeds
+	ds.pendingSeeds = nil
 
 	provenance := "wordlist"
 	if dir != "" {
 		provenance = "recursion:" + dir
 	}
-	ds.knownPaths = make(map[string]bool, len(c.wordlist))
+	ds.knownPaths = make(map[string]bool, len(c.wordlist)+len(pending))
 	for _, entry := range c.wordlist {
 		typ := TypeDir
 		if entry.Type == wordlist.EntryFile {
@@ -698,22 +710,48 @@ func (c *Coordinator) pushWordlistCandidates(dir string, ds *dirState) {
 			ParentDir:  dir,
 			Provenance: provenance,
 		}
+		mergeSeedCandidate(pending, &cand) // spec §3: a seed at this path upgrades it in place (max prio, unioned provenance)
 		cand.Score = c.scoreCandidate(cand)
 		ds.knownPaths[entry.Word] = true
 		c.frontier.Push(cand)
 	}
+	// Whatever's left in pending after the loop above didn't match any
+	// template entry — a genuinely new path the seed named (the deep-seed
+	// case, spec §4).
+	leftoverSeeds := len(pending)
+	for path, cand := range pending {
+		cand.Score = c.scoreCandidate(cand)
+		ds.knownPaths[path] = true
+		c.frontier.Push(cand)
+	}
+
+	ds.candidatesTotal = len(c.wordlist) + leftoverSeeds
+	if dir == "" {
+		ds.candidatesTotal += len(c.nmapSeeds)
+	}
+	if ds.candidatesTotal == 0 {
+		ds.state = dirDone
+		return
+	}
+	ds.budget = ds.candidatesTotal // PER_DIR_BUDGET default = wordlist size (+seeds, +nmap at root)
+	if c.config.PerDirBudget > 0 {
+		ds.budget = c.config.PerDirBudget + leftoverSeeds
+		if dir == "" {
+			ds.budget += len(c.nmapSeeds)
+		}
+	}
 
 	if dir == "" {
-		for _, seed := range c.nmapSeeds {
-			ds.knownPaths[seed.Path] = true
+		for _, ns := range c.nmapSeeds {
+			ds.knownPaths[ns.Path] = true
 			c.frontier.Push(Candidate{
-				Path:       seed.Path,
+				Path:       ns.Path,
 				Type:       TypeFullPath,
 				BasePrio:   1.0,
 				Score:      nmapSeedScore,
 				Depth:      ds.depth + 1,
 				ParentDir:  dir,
-				Provenance: seed.Provenance,
+				Provenance: ns.Provenance,
 			})
 		}
 	}

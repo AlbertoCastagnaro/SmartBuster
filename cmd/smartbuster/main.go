@@ -21,6 +21,7 @@ import (
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/output"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/profile"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
+	passiveseed "github.com/AlbertoCastagnaro/SmartBuster/internal/seed"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/wordlist"
 )
 
@@ -283,6 +284,12 @@ func runScan(args []string) {
 	reprioHits := fs.Int("reprio-hits", engine.DefaultReprioHits, "REPRIO_INTERVAL: reprioritize the frontier after this many qualifying hits")
 	reprioInterval := fs.Duration("reprio-interval", engine.DefaultReprioInterval, "REPRIO_INTERVAL: or after this much elapsed time, whichever first")
 
+	robots := fs.Bool("robots", true, "seed from robots.txt Disallow/Allow directives (spec §5.1)")
+	sitemap := fs.Bool("sitemap", true, "seed from sitemap.xml, incl. sitemaps declared in robots.txt (spec §5.2)")
+	wayback := fs.Bool("wayback", false, "seed from the Wayback Machine/CDX; opt-in, off-target network call (spec §5.3)")
+	waybackMax := fs.Int("wayback-max", passiveseed.WaybackMaxDefault, "WAYBACK_MAX: CDX row cap before scope/asset/dedup filtering")
+	seedAssets := fs.Bool("seed-assets", false, "keep static-asset noise (.png/.css/...) from Wayback seeds")
+
 	var allowHosts, excludeHosts, excludePatterns stringList
 	fs.Var(&allowHosts, "allow-host", "additional in-scope host (repeatable); defaults to the target(s)' own host")
 	fs.Var(&excludeHosts, "exclude-host", "host to exclude from scope (repeatable)")
@@ -294,6 +301,7 @@ func runScan(args []string) {
 	// can appear in any order, matching normal CLI conventions.
 	flagArgs, targets := splitFlagsAndPositional(args, map[string]bool{
 		"dry-run": true, "run-nmap": true, "active-probes": true, "favicon-probe": true,
+		"robots": true, "sitemap": true, "wayback": true, "seed-assets": true,
 	})
 	fs.Parse(flagArgs)
 	if len(targets) == 0 {
@@ -338,6 +346,11 @@ func runScan(args []string) {
 		Epsilon:          *epsilon,
 		ReprioHits:       *reprioHits,
 		ReprioInterval:   *reprioInterval,
+		Robots:           *robots,
+		Sitemap:          *sitemap,
+		Wayback:          *wayback,
+		WaybackMax:       *waybackMax,
+		SeedAssets:       *seedAssets,
 	}
 
 	if *dryRun {
