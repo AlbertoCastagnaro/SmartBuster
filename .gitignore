@@ -8,3 +8,4 @@
 # `//go:embed all:assets` fails to compile against a truly empty dir.
 /internal/daemon/assets/*
 !/internal/daemon/assets/PLACEHOLDER.md
+.claude/
