@@ -14,6 +14,15 @@ const (
 	PrioRobotsAllow    = 0.85
 	PrioWaybackRecent  = 0.85
 	PrioWaybackOld     = 0.70
+
+	// Phase 4b active-harvest priors (spec §7): CRAWL_HTML_PRIOR,
+	// CRAWL_JS_PRIOR, HEADLESS_PRIOR. Co-located with the passive-seeding
+	// priors above since Normalize's basePrio (and its cross-source
+	// dedup/merge) is the single place every seed source's prior tiering
+	// happens, active or passive alike.
+	PrioCrawlHTML = 0.90
+	PrioCrawlJS   = 0.85
+	PrioHeadless  = 0.90
 )
 
 // waybackRecentWindow is the recency cutoff for Wayback's recent-vs-old
@@ -113,6 +122,12 @@ func basePrio(source string, now time.Time) float64 {
 		return PrioSitemap
 	case source == "robots:allow":
 		return PrioRobotsAllow
+	case source == "crawl:html":
+		return PrioCrawlHTML
+	case source == "crawl:js":
+		return PrioCrawlJS
+	case source == "headless":
+		return PrioHeadless
 	case strings.HasPrefix(source, "wayback:"):
 		if isRecentCapture(strings.TrimPrefix(source, "wayback:"), now) {
 			return PrioWaybackRecent

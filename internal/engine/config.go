@@ -69,6 +69,15 @@ type Config struct {
 	WaybackMax int    // 0 = seed.WaybackMaxDefault
 	SeedAssets bool   // --seed-assets: keep static-asset noise from Wayback seeds
 	WaybackURL string // CDX endpoint override; "" = seed.CDXBaseURL (real archive.org). Lets tests point at a stub.
+
+	// Phase 4b crawl + JS harvesting + SPA pivot (spec §7). Crawl/JSHarvest
+	// default true (near-free / bounded) and Headless defaults false
+	// (opt-in, heavy) — like Robots/Sitemap/Wayback above, these are bools
+	// callers must set explicitly; there's no "<=0 means default" for one.
+	Crawl      bool
+	JSHarvest  bool
+	Headless   bool
+	CrawlDepth int // 0 = MaxDepth
 }
 
 // ScoreWeights are the Phase 3 dynamic-signal weights (spec §7): Boost
@@ -103,4 +112,10 @@ const (
 	DefaultReprioInterval   = 500 * time.Millisecond
 
 	GenSiblingBound = 5 // spec §7: bound on generated sibling/sequence candidates per hit
+
+	// SPABruteForceScoreDown is the SPA pivot's deprioritization factor
+	// (spec §4: "scale corpus-candidate scores down, don't purge" —
+	// reorder-not-exclude). Brute-force candidates stay dispatchable, just
+	// far behind harvested ones once root calibrates as an SPA.
+	SPABruteForceScoreDown = 0.1
 )

@@ -13,6 +13,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/calibration"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/harvest"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/simhash"
 )
@@ -20,7 +21,10 @@ import (
 // RunWorker is a stateless HTTP executor: it never touches coordinator
 // state, only (item, network) -> WorkResult. ctx cancellation is respected
 // both while idle (waiting on workCh) and while trying to hand back a result.
-func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- WorkResult, client *httpclient.Client) {
+// harvestEnabled is scan-wide (Config.Crawl || Config.JSHarvest) and gates
+// body retention for ordinary candidate responses (spec §2); it never
+// changes over a scan's lifetime, so passing it once here is enough.
+func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- WorkResult, client *httpclient.Client, harvestEnabled bool) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -29,7 +33,7 @@ func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- Wor
 			if !ok {
 				return
 			}
-			result := process(ctx, item, client)
+			result := process(ctx, item, client, harvestEnabled)
 			select {
 			case resultsCh <- result:
 			case <-ctx.Done():
@@ -39,14 +43,34 @@ func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- Wor
 	}
 }
 
-func process(ctx context.Context, item WorkItem, client *httpclient.Client) WorkResult {
+func process(ctx context.Context, item WorkItem, client *httpclient.Client, harvestEnabled bool) WorkResult {
 	resp, elapsed, err := client.Do(ctx, item.URL)
 	if err != nil {
 		return WorkResult{Item: item, Err: err}
 	}
 	defer resp.Body.Close()
 
-	body := readCapped(resp.Body, calibration.MaxBody)
+	ct := mediaType(resp)
+
+	// Body retention is scoped (spec §2, contract C): an explicit harvest
+	// fetch (JS bundle / SPA-pivot root, requested by a producer that
+	// already knows the URL is worth mining) always retains up to
+	// JS_MAX_BYTES; an ordinary candidate response only retains a body when
+	// harvesting is enabled AND its Content-Type looks harvestable, up to
+	// the smaller HARVEST_BODY_CAP. Everything else reads (and retains) at
+	// calibration's usual MaxBody, unchanged from Phase 1.
+	readCap := int64(calibration.MaxBody)
+	harvestable := false
+	switch {
+	case item.IsHarvestFetch:
+		readCap = harvest.JSMaxBytes
+		harvestable = isHarvestableContentType(ct)
+	case harvestEnabled && isHarvestableContentType(ct):
+		readCap = harvest.HarvestBodyCap
+		harvestable = true
+	}
+
+	body := readCapped(resp.Body, readCap)
 	token := requestedToken(item)
 	norm := calibration.Normalize(body, token)
 
@@ -57,7 +81,7 @@ func process(ctx context.Context, item WorkItem, client *httpclient.Client) Work
 		SimHash:     simhash.SimHash(calibration.Shingles(norm)),
 		RawBodyHash: xxhash.Sum64String(norm),
 		RedirectTo:  normalizeRedirect(resp.Header.Get("Location")),
-		ContentType: mediaType(resp),
+		ContentType: ct,
 		SetCookie:   resp.Header.Get("Set-Cookie") != "",
 		Reflected:   item.IsProbe && bytes.Contains(body, []byte(token)),
 		Elapsed:     elapsed,
@@ -73,7 +97,21 @@ func process(ctx context.Context, item WorkItem, client *httpclient.Client) Work
 		// representative sample instead of an extra request.
 		sig.NormBody = norm
 	}
+	if harvestable && resp.StatusCode == http.StatusOK && int64(len(body)) < readCap {
+		sig.HarvestBody = body
+	}
 	return WorkResult{Item: item, Signature: sig}
+}
+
+// isHarvestableContentType is spec §2's Content-Type gate: only these three
+// media types are ever worth mining for links/endpoints.
+func isHarvestableContentType(ct string) bool {
+	switch ct {
+	case "text/html", "application/javascript", "application/json":
+		return true
+	default:
+		return false
+	}
 }
 
 // readCapped reads at most max bytes from r. A read error (e.g. connection

@@ -290,6 +290,11 @@ func runScan(args []string) {
 	waybackMax := fs.Int("wayback-max", passiveseed.WaybackMaxDefault, "WAYBACK_MAX: CDX row cap before scope/asset/dedup filtering")
 	seedAssets := fs.Bool("seed-assets", false, "keep static-asset noise (.png/.css/...) from Wayback seeds")
 
+	crawl := fs.Bool("crawl", true, "harvest HTML links from responses the scan already made (spec §3); near-free, no extra page fetches")
+	jsHarvest := fs.Bool("js-harvest", true, "fetch and mine JS bundles for endpoints (spec §4); bounded, shares the worker pool")
+	headless := fs.Bool("headless", false, "opt-in: capture live XHR/fetch URLs and rendered routes via a headless browser (spec §6); requires playwright installed, degrades gracefully if absent")
+	crawlDepth := fs.Int("crawl-depth", 0, "CrawlDepth: max path depth for crawl/JS/headless seeds; 0 = same as -depth")
+
 	var allowHosts, excludeHosts, excludePatterns stringList
 	fs.Var(&allowHosts, "allow-host", "additional in-scope host (repeatable); defaults to the target(s)' own host")
 	fs.Var(&excludeHosts, "exclude-host", "host to exclude from scope (repeatable)")
@@ -302,6 +307,7 @@ func runScan(args []string) {
 	flagArgs, targets := splitFlagsAndPositional(args, map[string]bool{
 		"dry-run": true, "run-nmap": true, "active-probes": true, "favicon-probe": true,
 		"robots": true, "sitemap": true, "wayback": true, "seed-assets": true,
+		"crawl": true, "js-harvest": true, "headless": true,
 	})
 	fs.Parse(flagArgs)
 	if len(targets) == 0 {
@@ -351,6 +357,10 @@ func runScan(args []string) {
 		Wayback:          *wayback,
 		WaybackMax:       *waybackMax,
 		SeedAssets:       *seedAssets,
+		Crawl:            *crawl,
+		JSHarvest:        *jsHarvest,
+		Headless:         *headless,
+		CrawlDepth:       *crawlDepth,
 	}
 
 	if *dryRun {
@@ -480,6 +490,8 @@ func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg e
 			}
 		case engine.EventWAFDetected:
 			fmt.Printf("[waf] %s\n", e.WAF)
+		case engine.EventSPAPivot:
+			fmt.Printf("[spa.pivot] %s: brute-force deprioritized, harvesting root for the real API surface\n", e.URL)
 		}
 	})
 

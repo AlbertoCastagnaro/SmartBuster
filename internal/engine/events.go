@@ -21,6 +21,11 @@ const (
 	// active-probe signals, nmap merge).
 	EventTechDetected EventType = "tech.detected"
 	EventWAFDetected  EventType = "waf.detected"
+
+	// EventSPAPivot is Phase 4b's SPA pivot (spec §4): fired once, when root
+	// calibrates as an SPA, right before brute-force is deprioritized and
+	// root's script bundles get harvested. URL carries the target.
+	EventSPAPivot EventType = "spa.pivot"
 )
 
 // TechEntry is the audit/event-friendly projection of one profile.Tech,

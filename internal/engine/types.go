@@ -45,10 +45,11 @@ type Finding struct {
 
 // Channel messages.
 type WorkItem struct {
-	Candidate Candidate
-	URL       string
-	IsProbe   bool   // calibration probe vs. real candidate
-	ProbeTag  string // groups probes belonging to one directory
+	Candidate      Candidate
+	URL            string
+	IsProbe        bool   // calibration probe vs. real candidate
+	ProbeTag       string // groups probes belonging to one directory
+	IsHarvestFetch bool   // Phase 4b: a JS-bundle or SPA-pivot root fetch requested by a harvest producer (spec §4, §5) — dispatched through the same paced pipeline as ordinary candidates, routed by content-type once the result comes back (see handleHarvestFetchResult)
 }
 
 type WorkResult struct {

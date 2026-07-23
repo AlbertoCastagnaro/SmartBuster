@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -171,6 +173,27 @@ type Coordinator struct {
 	// which paces requests to the *target* (spec §5.3: the target's own
 	// rate/stealth settings have nothing to do with a third-party host).
 	archivePacer *httpclient.Pacer
+
+	// Phase 4b crawl + JS harvesting + SPA pivot (spec §0 contract G, §5).
+	// seedInjectCh is the load-bearing primitive: producers (crawler, JS
+	// harvester, async Wayback, headless) send SeedBatch; only the
+	// coordinator goroutine ever reads it or applies one (applySeedBatch),
+	// preserving the frontier's single-writer invariant without a mutex.
+	// harvestFetchCh/harvestFetchQueue mirror that same producer/coordinator
+	// split for "please fetch this URL for me" requests (a JS bundle, or the
+	// SPA-pivot root page): producers send a URL, only the coordinator
+	// queues and dispatches it, so pacing and scope enforcement stay on the
+	// single goroutine that already owns them (contract E, G). pendingHarvest
+	// tracks in-flight producer goroutines so dispatchLoop's termination
+	// check doesn't end the scan while one is still about to deliver a batch.
+	seedInjectCh      chan SeedBatch
+	harvestFetchCh    chan string
+	harvestFetchQueue []WorkItem
+	pendingHarvest    atomic.Int32
+	crawlVisited      *visitedSet
+	targetHost        string // c.target's own host; the crawler/JS harvester's same-host filter (spec §3, §4)
+	crawlDepth        int    // spec §7 CrawlDepth; resolved once at construction, 0 -> MaxDepth
+	spaMode           bool   // spec §4: set once by the SPA pivot; deprioritizes (not purges) brute-force candidates for the rest of the scan
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -265,6 +288,14 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 	if reprioInterval <= 0 {
 		reprioInterval = DefaultReprioInterval
 	}
+	crawlDepth := cfg.CrawlDepth
+	if crawlDepth <= 0 {
+		crawlDepth = cfg.MaxDepth
+	}
+	targetHost := ""
+	if u, err := url.Parse(target); err == nil {
+		targetHost = u.Host
+	}
 
 	c := &Coordinator{
 		target:      target,
@@ -299,6 +330,19 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		reprioInterval:   reprioInterval,
 
 		archivePacer: archivePacer,
+
+		// Deliberately unbuffered: a producer's send must only complete once
+		// the coordinator is synchronously receiving (and, for seedInjectCh,
+		// about to run applySeedBatch as part of that very select-case body)
+		// — buffering would let a producer's spawnHarvest goroutine return
+		// and decrement pendingHarvest before the coordinator ever actually
+		// processes the message, which would let dispatchLoop's termination
+		// check race ahead of a batch that's queued but not yet applied.
+		seedInjectCh:   make(chan SeedBatch),
+		harvestFetchCh: make(chan string),
+		crawlVisited:   &visitedSet{seen: make(map[string]bool)},
+		targetHost:     targetHost,
+		crawlDepth:     crawlDepth,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -342,14 +386,17 @@ func (c *Coordinator) Run(ctx context.Context) {
 	c.emit(Event{Type: EventScanStarted, URL: c.target})
 	c.profileTarget(ctx) // spec §0 contract B: before any real dispatch
 	c.seedRoot()
-	c.seedPassive(ctx) // Phase 4a: robots/sitemap/wayback (spec §2) — root already exists, so pendingSeeds has somewhere to land
+	c.seedPassiveSync(ctx)   // Phase 4a: robots/sitemap (spec §2) — root already exists, so pendingSeeds has somewhere to land
+	c.seedWaybackAsync(ctx)  // Phase 4b contract H: off the critical path, delivered via seedInjectCh mid-scan
+	c.seedHeadlessAsync(ctx) // Phase 4b §6: opt-in, off the critical path like Wayback
 
+	harvestEnabled := c.config.Crawl || c.config.JSHarvest
 	var wg sync.WaitGroup
 	for i := 0; i < c.config.Concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			RunWorker(ctx, c.workCh, c.resultsCh, c.client)
+			RunWorker(ctx, c.workCh, c.resultsCh, c.client, harvestEnabled)
 		}()
 	}
 
@@ -368,6 +415,10 @@ func (c *Coordinator) dispatchLoop(ctx context.Context) {
 			return
 		case res := <-c.resultsCh:
 			c.handleResult(res)
+		case batch := <-c.seedInjectCh:
+			c.applySeedBatch(batch)
+		case url := <-c.harvestFetchCh:
+			c.enqueueHarvestFetch(url)
 		case <-c.pacer.C():
 			if item, ok := c.nextDispatchable(); ok {
 				c.inFlight++
@@ -378,7 +429,8 @@ func (c *Coordinator) dispatchLoop(ctx context.Context) {
 			c.pacer.Advance()
 		}
 
-		if c.frontier.Empty() && c.inFlight == 0 && c.allDirsDone() {
+		if c.frontier.Empty() && c.inFlight == 0 && len(c.harvestFetchQueue) == 0 &&
+			c.pendingHarvest.Load() == 0 && c.allDirsDone() {
 			c.emit(Event{Type: EventScanFinished})
 			return
 		}
@@ -432,6 +484,19 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 			ds.probeQueue = ds.probeQueue[1:]
 			return item, true
 		}
+	}
+
+	// Phase 4b harvest fetches (a JS bundle, or the SPA-pivot root page)
+	// dispatch next, ahead of the ordinary candidate frontier: they're
+	// cheap, bounded, and unlock the rest of the harvest pipeline (spec §4,
+	// §5) — like probes above, they go through the same paced/scoped
+	// dispatch as everything else, just outside the per-directory
+	// budget/tarpit/wildcard machinery below, which only applies to
+	// wordlist/corpus candidates.
+	if len(c.harvestFetchQueue) > 0 {
+		item := c.harvestFetchQueue[0]
+		c.harvestFetchQueue = c.harvestFetchQueue[1:]
+		return item, true
 	}
 
 	// This loop is the single enforcement point for PER_DIR_BUDGET and the
@@ -600,6 +665,10 @@ func (c *Coordinator) handleResult(res WorkResult) {
 		c.collectProbe(res)
 		return
 	}
+	if res.Item.IsHarvestFetch {
+		c.handleHarvestFetchResult(res)
+		return
+	}
 	c.handleReal(res)
 }
 
@@ -665,6 +734,13 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 			c.startCalibration(dir, ds.depth, ds.branchStart)
 			return
 		}
+	}
+
+	// spec §4: onCalibrationDone(dir) — the SPA pivot fires exactly once,
+	// right before root's own candidates are pushed, so deprioritization
+	// (scoreCandidate's spaMode check) is already in effect for them.
+	if dir == "" && baseline.IsSPA {
+		c.spaPivot()
 	}
 
 	c.pushCandidates(dir, ds)
@@ -802,6 +878,10 @@ func (c *Coordinator) handleReal(res WorkResult) {
 	}
 
 	c.detectWAFOnset(res)
+
+	if res.Signature.HarvestBody != nil {
+		c.harvestResponse(res.Item.URL, res.Signature)
+	}
 
 	if ds != nil {
 		ds.candidatesAccountedFor++

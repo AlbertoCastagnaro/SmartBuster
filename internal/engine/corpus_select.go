@@ -178,6 +178,12 @@ func (c *Coordinator) scoreCandidate(cand Candidate) float64 {
 	if c.scorer != nil {
 		score *= c.scorer.Boost(&cand)
 	}
+	// spec §4 SPA pivot: once root calibrates as an SPA, brute-force
+	// candidates are scaled down (not purged) in favor of harvested ones —
+	// reorder-not-exclude, so a generic brute-force term is still reachable.
+	if c.spaMode && !isHarvestProvenance(cand.Provenance) {
+		score *= SPABruteForceScoreDown
+	}
 	return score
 }
 

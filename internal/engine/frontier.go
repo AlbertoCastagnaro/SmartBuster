@@ -72,6 +72,24 @@ func (f *Frontier) SampleMidTier(rng *rand.Rand) (Candidate, bool) {
 	return c, true
 }
 
+// UpdateMatching finds the still-queued candidate at (dir, path) — if any —
+// applies fn to it in place, and re-heapifies just that element. Returns
+// false if no such candidate is currently queued (already dispatched, or
+// never existed): the caller then falls back to enqueueing a new one. This
+// is the mid-scan seed merge's landing point (spec §0 contract B, §5): a
+// linear scan is fine here since it only runs for a late-arriving seed's
+// dedup check, not the hot dispatch path.
+func (f *Frontier) UpdateMatching(dir, path string, fn func(*Candidate)) bool {
+	for i := range f.items {
+		if f.items[i].ParentDir == dir && f.items[i].Path == path {
+			fn(&f.items[i])
+			heap.Fix(&f.items, i)
+			return true
+		}
+	}
+	return false
+}
+
 type candidateHeap []Candidate
 
 func (h candidateHeap) Len() int            { return len(h) }

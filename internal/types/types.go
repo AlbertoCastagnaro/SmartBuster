@@ -42,6 +42,13 @@ type ResponseSignature struct {
 	// NormBody it costs nothing to keep on the hot path since it doesn't
 	// retain the body text itself.
 	HasIndexOf bool
+
+	// HarvestBody is the raw (unnormalized) response body, retained only
+	// under Phase 4b's scoped condition (spec §2): harvesting enabled,
+	// status 200, a harvestable Content-Type, and size under the source's
+	// cap. Left nil for every other response, mirroring NormBody's
+	// calibration-only exception.
+	HarvestBody []byte
 }
 
 // Baseline: learned "not found" profile for one directory.

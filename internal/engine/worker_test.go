@@ -25,7 +25,7 @@ func TestWorkerProducesSignatureForNormalResponse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunWorker(ctx, workCh, resultsCh, client)
+	go RunWorker(ctx, workCh, resultsCh, client, false)
 	workCh <- WorkItem{URL: srv.URL + "/hello", Candidate: Candidate{Path: "hello"}}
 
 	select {
@@ -62,7 +62,7 @@ func TestWorkerStripsReflectedPathToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunWorker(ctx, workCh, resultsCh, client)
+	go RunWorker(ctx, workCh, resultsCh, client, false)
 	workCh <- WorkItem{URL: srv.URL + "/aaaaaaaaaa", IsProbe: true}
 	workCh <- WorkItem{URL: srv.URL + "/bbbbbbbbbb", IsProbe: true}
 
@@ -98,7 +98,7 @@ func TestWorkerNormalizesRedirectLocation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunWorker(ctx, workCh, resultsCh, client)
+	go RunWorker(ctx, workCh, resultsCh, client, false)
 	workCh <- WorkItem{URL: srv.URL + "/secret"}
 
 	select {
@@ -121,7 +121,7 @@ func TestWorkerReportsNetworkError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go RunWorker(ctx, workCh, resultsCh, client)
+	go RunWorker(ctx, workCh, resultsCh, client, false)
 	workCh <- WorkItem{URL: "http://127.0.0.1:1/unreachable"}
 
 	select {
@@ -141,7 +141,7 @@ func TestWorkerExitsOnContextCancellation(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		RunWorker(ctx, workCh, resultsCh, httpclient.New(httpclient.Config{}))
+		RunWorker(ctx, workCh, resultsCh, httpclient.New(httpclient.Config{}), false)
 		close(done)
 	}()
 
