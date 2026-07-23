@@ -142,7 +142,7 @@ func (s *Server) handleSaveScan(w http.ResponseWriter, r *http.Request) {
 
 	state, err := scan.co.Save(r.Context())
 	if err != nil {
-		httpError(w, http.StatusInternalServerError, "save: "+err.Error())
+		writeControlError(w, err)
 		return
 	}
 	path, err := s.sessions.Save(name, state)

@@ -10,12 +10,21 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"path"
 	"strings"
 	"sync/atomic"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/seed"
 )
+
+// ErrScanNotRunning is SubmitControl/Save's error once Run has returned
+// (dispatchLoop's select no longer reads controlCh, so a command enqueued
+// after that point — or a snapshot reply waited on after that point — would
+// otherwise never arrive; this was a real, permanent deadlock before this
+// guard existed, discovered live against a finished scan's POST .../save).
+// The daemon maps this to HTTP 409.
+var ErrScanNotRunning = errors.New("scan is not running")
 
 type ControlKind string
 
@@ -68,12 +77,25 @@ type ControlCmd struct {
 // goroutine (contract C). It returns once the command is queued, not once
 // it's applied; ctx lets a caller give up rather than block forever against
 // a scan whose dispatchLoop has already returned.
+//
+// c.done is checked twice: once up front (the common case — the scan
+// already finished, so fail fast rather than queue a command nobody will
+// ever drain) and again inside the select (the race where Run returns while
+// this call is blocked waiting for controlCh to have room, vanishingly
+// unlikely given its 32-deep buffer, but not impossible).
 func (c *Coordinator) SubmitControl(ctx context.Context, cmd ControlCmd) error {
+	select {
+	case <-c.done:
+		return ErrScanNotRunning
+	default:
+	}
 	select {
 	case c.controlCh <- cmd:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-c.done:
+		return ErrScanNotRunning
 	}
 }
 

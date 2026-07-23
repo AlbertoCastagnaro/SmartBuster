@@ -78,6 +78,16 @@ type SnapshotPayload struct {
 ```
 Both are emitted from the coordinator goroutine (single-writer-safe) and are *replace-latest* in the hub.
 
+**`hit` payload (post-hoc addition — see §10's gap-fix note):** as originally shipped, `hit` carried only `Confidence`; Phase 5b's build surfaced that this was a real gap (the UI's whole legibility story depends on provenance, and it couldn't get it from this event at all), so `hit` (both the canonical and `Message:"alias"` cases) now also carries:
+```go
+type HitPayload struct {
+	Provenance string
+	Status     int
+	Size       int
+}
+```
+Mirrors the fields `Finding` already had — sourced from the same `Candidate`/`ResponseSignature` `handleHit` already reads to build the `Finding`, so no new state, just no longer withheld from the wire.
+
 **Wire the two dead types (decision #3):**
 - `branch.pruned` (Category `trap`): emit at the moment a branch is actually **cut** (novelty/self-similarity/tarpit/budget) — distinct from `trap.detected` (suspicion). The UI shows detection → pruning as two moments.
 - `error` (Category `error`): emit on request errors (timeouts, conn resets, TLS failures) so the UI can show an error count/panel. `AuditRecord.Err` remains the lossless record; `error` is the stream signal. Payload: `{URL, Kind, Message}`.
@@ -97,6 +107,7 @@ All state-changing control routes translate to a command on **`controlCh`**, app
 | `POST /api/scans/{id}/pin` \| `/exclude` \| `/boost` \| `/demote` | manual override on a path/pattern (§4.1) |
 | `POST /api/scans/{id}/inject` | inject custom terms mid-scan (→ `enqueueSeed`, provenance `user`) |
 | `GET /api/scans/{id}/events` | **WS upgrade** → the event stream |
+| `GET /api/scans/{id}/findings` | **(post-hoc addition — §10)** the authoritative findings list (`[]Finding`), so a WS-reconnect resync can rebuild the tree/findings from more than `ScanStatus`'s bare count |
 | `POST /api/scans/{id}/save` / `GET /api/sessions` / `POST /api/sessions/{id}/resume` / `GET /api/sessions/{id}` | sessions (§6) |
 
 **4.1 Manual override (the human outranks the engine).** `controlCh` commands mutating the frontier single-writer: `pin(pattern)` → force-try + top priority (even if not in corpus); `exclude(pattern)` → remove from frontier + add to a denylist checked at every enqueue; `boost/demote(pattern, factor)` → a persistent score multiplier applied in `scoreCandidate` (like SPA damping); `inject(terms)` → user seeds. Patterns are glob/prefix. All are also reachable from the CLI (same commands, same `controlCh`), so no capability lives only in the GUI.
@@ -169,3 +180,14 @@ ResumePath                     // `resume <file>` subcommand's positional arg
 - **Session storage on disk: one JSON file per session** under a directory (`--session-dir`, default a per-user config dir via `os.UserConfigDir()`), named `<id>.json`; a session's `id` in `GET/POST /api/sessions/...` is that filename's stem. Not literally specified by §6's text (which only names the wire schema); `internal/daemon/sessions.go`'s `SessionStore` is the concrete on-disk layout. `POST .../save`'s request body may set `{"name": "..."}` to choose the id explicitly; it defaults to the scan's own id.
 - **WS transport is `golang.org/x/net/websocket`**, not `gorilla/websocket` or a hand-rolled implementation — it was already available as a subpackage of `golang.org/x/net`, an existing direct dependency, so no new entry was needed in `go.mod`/`go.sum`. Its `Server.Handshake` hook is what makes the token/Origin-before-101-response ordering straightforward.
 - **Routing uses Go's standard-library `net/http.ServeMux`** (1.22+'s method+pattern+`{wildcard}` matching, e.g. `"POST /api/scans/{id}/pause"`, `r.PathValue("id")`) — no external router dependency, matching the rest of the project's minimal-dependency posture.
+
+### Post-5b gap-fix pass (pre-Phase-6)
+
+Phase 5b's build against this "frozen" protocol surfaced four real gaps — three in what the wire didn't carry, one an actual bug — fixed here rather than carried into Phase 6, since none of them are stealth-related and shipping a known deadlock into more control-plane usage was asking for it:
+
+- **Fixed — a finished/stopped scan's control calls used to hang the HTTP request forever.** `Coordinator.SubmitControl` sent on the buffered `controlCh` (32 deep) with no check that anything would ever read it back out; once `dispatchLoop`'s `select` had returned (scan finished), a queued command — and, worse, `Save`'s wait on its `Result` reply channel — had no consumer left and no timeout, so the request simply never completed. Fixed with a `done chan struct{}` on `Coordinator`, closed by `defer` at the top of `Run`: `SubmitControl` and `Save` now select on it too and return `ErrScanNotRunning` immediately (checked up front for the common case, and again inside the blocking select for the narrow race where `Run` returns mid-call). The daemon maps `ErrScanNotRunning` to `409 Conflict` (`writeControlError` in `server.go`) instead of the blanket `500` every other control error got. Confirmed live: `curl POST .../save` against a finished scan now returns `409` in under a millisecond instead of hanging.
+- **Fixed — `hit` now carries `Provenance`/`Status`/`Size`** (§3's `HitPayload`, added above) closing the gap 5b's frontend had to work around with a fragile, partial `frontier.snapshot`-correlation heuristic (most hits never appeared in a snapshot, so the tag usually read "unknown"). No behavior changed engine-side — this is `handleHit` handing the wire two fields (`Candidate.Provenance`, `ResponseSignature.Status/BodyLen`) it already had in hand for the `Finding` it was building anyway.
+- **Fixed — no route returned the findings list, only a count.** `ScanStatus.Findings` (an `int`) was all a WS-reconnect resync could get; the tree/findings a dropped connection missed could never actually be rebuilt, only flagged as possibly-stale. `GET /api/scans/{id}/findings` (§4 table, above) closes this — it's also groundwork Phase 7's Burp/markdown exports need anyway (an accessor for "the findings, structured"), so this wasn't purely a 5b-driven detour.
+- **De-flaked `TestHub_HitFloodCoalescesForStalledClient`** (`internal/daemon/hub_internal_test.go`): not a timing-tolerance issue — the flood loop could starve the *fast* client's own `sendLoop` goroutine of scheduling time (worse under `-race`'s per-access instrumentation), letting its buffer overflow past `ClientBufCap` too and permanently coalesce away some of its own hits, so no timeout length would ever have been enough. Fixed with real backpressure (the flood loop now waits for the fast client to stay within a bounded distance of the send count) rather than a longer wait. 20 runs under `-race`: clean, ~1s total.
+
+`go build`, `go vet`, and `go test -race ./...` are clean across the whole repo after this pass.

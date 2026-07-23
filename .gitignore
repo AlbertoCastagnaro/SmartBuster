@@ -1,0 +1,10 @@
+/web/node_modules/
+/web/dist/
+
+# `make ui` copies web/dist/ here (spec smartbuster-phase5b-spec.md §2); the
+# built bundle is a generated artifact, not source. PLACEHOLDER.md stays
+# tracked so a bare `go build` on a fresh clone (before ever running
+# `make ui`) still has a non-empty directory to embed — Go's
+# `//go:embed all:assets` fails to compile against a truly empty dir.
+/internal/daemon/assets/*
+!/internal/daemon/assets/PLACEHOLDER.md

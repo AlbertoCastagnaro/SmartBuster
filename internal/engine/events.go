@@ -116,6 +116,22 @@ type ErrorPayload struct {
 	Message string
 }
 
+// HitPayload is the `hit` event's structured detail (phase 5b follow-up:
+// the wire Event carried Confidence but no Provenance/Status/Size, even
+// though Finding — the internal record a hit becomes — has all three; the
+// 5b web UI could only render a provenance tag by opportunistically
+// correlating a hit's URL against recent frontier.snapshot sightings,
+// which is necessarily partial (snapshots sample only the top 25 every
+// ~1s). This carries the same fields Finding does, straight from the
+// Candidate/response that produced the hit, for both the canonical and
+// alias case — an alias is still a real, distinctly-dispatched request
+// with its own candidate/response.
+type HitPayload struct {
+	Provenance string
+	Status     int
+	Size       int
+}
+
 // payloadFor marshals v (always one of the typed payload structs above, all
 // trivially marshalable) into Event.Payload. An error here would mean a
 // non-marshalable type was passed by mistake — a programmer error, not a
@@ -160,8 +176,8 @@ type Event struct {
 	WAF  string      `json:"waf,omitempty"`
 
 	// Payload is a typed struct (WarnPayload/StatsPayload/SnapshotPayload/
-	// ErrorPayload) for the event types that carry one (spec §3 NEW); empty
-	// for every other event type.
+	// ErrorPayload/HitPayload) for the event types that carry one (spec §3
+	// NEW); empty for every other event type.
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 

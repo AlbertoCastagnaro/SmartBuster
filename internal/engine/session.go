@@ -90,6 +90,15 @@ type SessionState struct {
 // request over controlCh (contract C — buildSnapshot itself only ever runs
 // on the coordinator goroutine, alongside every other frontier/dirs
 // mutation) and waits for the result.
+//
+// This used to be able to hang forever: SubmitControl's buffered controlCh
+// accepts the CtrlSnapshot command even after Run has returned (nothing
+// checked that), so a caller with no ctx deadline (e.g. a plain HTTP
+// request context) would block on <-result indefinitely, since
+// applyControl — the only thing that ever sends to Result — never runs
+// again. The <-c.done case closes that: once Run has returned, Save fails
+// fast with ErrScanNotRunning instead of waiting on a reply that can now
+// never arrive.
 func (c *Coordinator) Save(ctx context.Context) (SessionState, error) {
 	result := make(chan SessionState, 1)
 	if err := c.SubmitControl(ctx, ControlCmd{Kind: CtrlSnapshot, Result: result}); err != nil {
@@ -100,6 +109,8 @@ func (c *Coordinator) Save(ctx context.Context) (SessionState, error) {
 		return snap, nil
 	case <-ctx.Done():
 		return SessionState{}, ctx.Err()
+	case <-c.done:
+		return SessionState{}, ErrScanNotRunning
 	}
 }
 

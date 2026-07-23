@@ -39,8 +39,15 @@ func (t *blockingTransport) Close() error { return nil }
 // history, not just the most recent write.
 type countingTransport struct {
 	mu       sync.Mutex
+	cond     *sync.Cond // broadcast on every write, so waiters below block on Cond.Wait rather than polling
 	count    int
 	messages [][]byte
+}
+
+func newCountingTransport() *countingTransport {
+	tr := &countingTransport{}
+	tr.cond = sync.NewCond(&tr.mu)
+	return tr
 }
 
 func (t *countingTransport) WriteMessage(b []byte) error {
@@ -48,6 +55,7 @@ func (t *countingTransport) WriteMessage(b []byte) error {
 	defer t.mu.Unlock()
 	t.count++
 	t.messages = append(t.messages, append([]byte(nil), b...))
+	t.cond.Broadcast()
 	return nil
 }
 func (t *countingTransport) Close() error { return nil }
@@ -55,6 +63,26 @@ func (t *countingTransport) get() (int, [][]byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.count, append([][]byte(nil), t.messages...)
+}
+
+// waitUntilDeadline blocks on cond (mu must already be held) until pred is
+// true, waking on every WriteMessage's Broadcast rather than polling on a
+// fixed interval — deterministic and immediate rather than racing a
+// wall-clock sleep loop against CPU scheduling pressure (this replaced a
+// `time.Sleep(time.Millisecond)` poll loop that intermittently lost that
+// race under load — see the phase 5b/6 handoff). The deadline is a pure
+// safety net against a genuine hang, not the synchronization mechanism
+// itself, so it can stay generous without slowing the common case.
+func waitUntilDeadline(cond *sync.Cond, deadline time.Time, pred func() bool) bool {
+	for !pred() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		timer := time.AfterFunc(time.Until(deadline), cond.Broadcast)
+		cond.Wait()
+		timer.Stop()
+	}
+	return true
 }
 
 // waitForMarker blocks until fastTr has written a frame containing marker
@@ -65,16 +93,13 @@ func (t *countingTransport) get() (int, [][]byte) {
 // had enqueue called for every event sent before the marker too.
 func waitForMarker(t *testing.T, fastTr *countingTransport, marker []byte) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, msgs := fastTr.get(); containsMarker(msgs, marker) {
-			return
-		}
-		if time.Now().After(deadline) {
-			n, _ := fastTr.get()
-			t.Fatalf("marker %q never observed by the fast client — hub fan-out did not keep up (count=%d)", marker, n)
-		}
-		time.Sleep(time.Millisecond)
+	fastTr.mu.Lock()
+	defer fastTr.mu.Unlock()
+	ok := waitUntilDeadline(fastTr.cond, time.Now().Add(30*time.Second), func() bool {
+		return containsMarker(fastTr.messages, marker)
+	})
+	if !ok {
+		t.Fatalf("marker %q never observed by the fast client — hub fan-out did not keep up (count=%d)", marker, fastTr.count)
 	}
 }
 
@@ -95,16 +120,13 @@ func containsMarker(msgs [][]byte, marker []byte) bool {
 // yet in that case, only that it's been enqueued.
 func waitForCount(t *testing.T, fastTr *countingTransport, want int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if got, _ := fastTr.get(); got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			got, _ := fastTr.get()
-			t.Fatalf("fast client wrote %d frames, want %d", got, want)
-		}
-		time.Sleep(time.Millisecond)
+	fastTr.mu.Lock()
+	defer fastTr.mu.Unlock()
+	ok := waitUntilDeadline(fastTr.cond, time.Now().Add(30*time.Second), func() bool {
+		return fastTr.count == want
+	})
+	if !ok {
+		t.Fatalf("fast client wrote %d frames, want %d", fastTr.count, want)
 	}
 }
 
@@ -125,7 +147,7 @@ func TestHub_StalledClientNeverBlocksFanout(t *testing.T) {
 	stalled := NewClient(hub, stalledTr)
 	hub.Register(stalled)
 
-	fastTr := &countingTransport{}
+	fastTr := newCountingTransport()
 	fast := NewClient(hub, fastTr)
 	hub.Register(fast)
 
@@ -173,7 +195,7 @@ func TestHub_ReplaceLatestForStatsAndSnapshot(t *testing.T) {
 	stalled := NewClient(hub, stalledTr)
 	hub.Register(stalled)
 
-	fastTr := &countingTransport{}
+	fastTr := newCountingTransport()
 	fast := NewClient(hub, fastTr)
 	hub.Register(fast)
 
@@ -220,13 +242,34 @@ func TestHub_HitFloodCoalescesForStalledClient(t *testing.T) {
 	stalled := NewClient(hub, stalledTr)
 	hub.Register(stalled)
 
-	fastTr := &countingTransport{}
+	fastTr := newCountingTransport()
 	fast := NewClient(hub, fastTr)
 	hub.Register(fast)
 
+	// backpressureSlack keeps the fast client's own buffered hit count well
+	// clear of ClientBufCap throughout the flood. Without this, the test
+	// goroutine and the hub's Run goroutine — both CPU-bound, no I/O — can
+	// enqueue all n events faster than the OS scheduler gives the fast
+	// client's sendLoop goroutine a turn to drain any of them (dramatically
+	// more likely under `-race`, whose per-access instrumentation slows
+	// every mutex lock/append substantially). Once that happens the fast
+	// client's own cl.hits overflows past ClientBufCap exactly like the
+	// deliberately-stalled client — coalescing away some of its hits
+	// permanently, so waitForCount below would wait forever for a frame
+	// count the fast client can now never reach again. A real WS client's
+	// sendLoop doesn't face this: actual network writes interleave with
+	// production naturally. This backpressure restores that interleaving
+	// instead of assuming the scheduler provides it for free.
 	const n = ClientBufCap + 500
+	const backpressureSlack = ClientBufCap / 4
 	for i := 0; i < n; i++ {
 		hub.In <- engine.Event{Type: engine.EventHit, URL: fmt.Sprintf("/hit-%d", i)}
+		if i%16 == 15 {
+			target := i - backpressureSlack
+			fastTr.mu.Lock()
+			waitUntilDeadline(fastTr.cond, time.Now().Add(10*time.Second), func() bool { return fastTr.count >= target })
+			fastTr.mu.Unlock()
+		}
 	}
 	marker := []byte("the-marker")
 	hub.In <- engine.Event{Type: engine.EventWarning, Message: "the-marker"}

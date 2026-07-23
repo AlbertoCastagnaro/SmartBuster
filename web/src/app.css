@@ -1,0 +1,197 @@
+/* smartbuster operator dashboard — dark, dense, monospace-forward.
+ * Provenance colors follow the dataviz skill's categorical method: 8
+ * validated hues (see palette validation run in the phase 5b build log)
+ * cover the narratively "smart" sources; robots/sitemap/generated/probe are
+ * deliberately muted (they're boilerplate passive seeding or system
+ * fallbacks, not signals worth spending a bright categorical slot on).
+ * Every color ships with a visible text label — never color-alone — which
+ * is what makes 8 hues legal for 10+ categories (CVD floor band, secondary
+ * encoding required).
+ */
+
+:root {
+  color-scheme: dark;
+
+  --surface-0: #0d0e12; /* page plane */
+  --surface-1: #16171d; /* panel surface */
+  --surface-2: #1e2028; /* raised / hovered */
+  --surface-3: #262835; /* active / selected */
+
+  --text-primary: #e8e9ed;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  --border: #2e303a;
+  --border-strong: #3d4050;
+
+  --accent: #3987e5;
+  --accent-bg: rgba(57, 135, 229, 0.15);
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #e66767;
+  --critical-rgb: 230, 103, 103;
+
+  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Provenance categorical slots (dark set, validated worst-adjacent CVD ΔE 10.3) */
+  --prov-corpus: #3987e5;
+  --prov-crawl-html: #199e70;
+  --prov-crawl-js: #c98500;
+  --prov-wordlist: #008300;
+  --prov-nmap: #9085e9;
+  --prov-user: #e66767;
+  --prov-wayback: #d55181;
+  --prov-headless: #d95926;
+  /* Muted / low-salience sources: passive seeding or system fallback, not a
+     signal worth a bright slot; distinguished by label text, not hue. */
+  --prov-robots: #7a7f8c;
+  --prov-sitemap: #7a7f8c;
+  --prov-generated: #7a7f8c;
+  --prov-probe: #565a66;
+  --prov-unknown: #4b4e58;
+
+  font: 14px/1.5 var(--sans);
+  color: var(--text-primary);
+  background: var(--surface-0);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* This dashboard is dark-only by design (an operator tool run locally,
+   spec §9) — color-scheme is fixed above rather than branching on
+   prefers-color-scheme/data-theme, unlike a themeable marketing surface. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+h1 {
+  font-size: 15px;
+}
+h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+}
+
+button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Shared provenance chip — every view (tree/frontier/findings) renders
+   provenance through this one class so the color/tag system stays uniform
+   (spec §5: "use it everywhere"). */
+.prov-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.prov-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dot, var(--text-muted));
+  flex: none;
+}
+
+/* HTTP status badge (spec §4.3: "403/protected paths are visually marked") */
+.status-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex: none;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.status-badge.protected {
+  color: var(--critical);
+  border-color: var(--critical);
+}
+.status-badge.redirect {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.status-badge.error {
+  color: var(--serious);
+  border-color: var(--serious);
+}

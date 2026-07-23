@@ -6,6 +6,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -53,6 +54,12 @@ func (s *Server) routes() {
 	// header (or, for that matter, a custom middleware's response) to a WS
 	// upgrade request the way it can a normal fetch.
 	s.mux.Handle("GET /api/scans/{id}/events", s.handleEvents())
+	// Phase 5b follow-up: the WS event stream is lossy by design (spec §2),
+	// but until this route existed a reconnect's resync (GET .../{id}) could
+	// only report a findings *count* — never rebuild the tree/findings list
+	// a dropped connection actually missed. This closes that: an
+	// authoritative, on-demand read of what handleHit has confirmed so far.
+	s.mux.Handle("GET /api/scans/{id}/findings", ro(s.handleGetFindings))
 	s.mux.Handle("POST /api/scans/{id}/save", mut(s.handleSaveScan))
 	s.mux.Handle("GET /api/sessions", ro(s.handleListSessions))
 	s.mux.Handle("POST /api/sessions/{id}/resume", mut(s.handleResumeSession))
@@ -72,6 +79,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func httpError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeControlError maps a control-plane error to its HTTP status:
+// engine.ErrScanNotRunning means the scan's Coordinator.Run has already
+// returned (finished/stopped) — a client retrying or racing a "finished"
+// transition is a normal, expected condition, not a server fault, so it's
+// 409 Conflict rather than the blanket 500 every other control error gets.
+func writeControlError(w http.ResponseWriter, err error) {
+	if errors.Is(err, engine.ErrScanNotRunning) {
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpError(w, http.StatusInternalServerError, err.Error())
 }
 
 // --- POST /api/scans ---
@@ -146,6 +166,18 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, scan.Status())
 }
 
+// handleGetFindings serves GET /api/scans/{id}/findings: the authoritative
+// findings list (engine.Coordinator.Findings, safe to call at any point —
+// including after Run has returned), so a client resyncing after a WS
+// reconnect can rebuild its tree/findings from something more than a count.
+func (s *Server) handleGetFindings(w http.ResponseWriter, r *http.Request) {
+	scan, ok := s.getScanOr404(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, scan.co.Findings())
+}
+
 // --- pause / resume / stop ---
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +196,7 @@ func (s *Server) simpleControl(w http.ResponseWriter, r *http.Request, kind engi
 		return
 	}
 	if err := scan.Control(r.Context(), engine.ControlCmd{Kind: kind}); err != nil {
-		httpError(w, http.StatusInternalServerError, err.Error())
+		writeControlError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, scan.Status())
@@ -192,7 +224,7 @@ func (s *Server) handleAdjust(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd := engine.ControlCmd{Kind: engine.CtrlAdjust, SetRate: req.Rate, SetConcurrency: req.Concurrency, SetMode: req.Mode}
 	if err := scan.Control(r.Context(), cmd); err != nil {
-		httpError(w, http.StatusInternalServerError, err.Error())
+		writeControlError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, scan.Status())
@@ -232,7 +264,7 @@ func (s *Server) patternControl(w http.ResponseWriter, r *http.Request, kind eng
 	}
 	cmd := engine.ControlCmd{Kind: kind, Pattern: req.Pattern, Factor: req.Factor}
 	if err := scan.Control(r.Context(), cmd); err != nil {
-		httpError(w, http.StatusInternalServerError, err.Error())
+		writeControlError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -257,7 +289,7 @@ func (s *Server) handleInject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := scan.Control(r.Context(), engine.ControlCmd{Kind: engine.CtrlInject, Terms: req.Terms}); err != nil {
-		httpError(w, http.StatusInternalServerError, err.Error())
+		writeControlError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

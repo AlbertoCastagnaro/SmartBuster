@@ -217,6 +217,15 @@ type Coordinator struct {
 	paused    bool
 	overrides []override // spec §4.1: pin/exclude/boost/demote, checked by scoreCandidate/isExcluded
 
+	// done is closed when Run returns (defer, so every exit path — normal
+	// completion or CtrlStop's cancel — covers it). dispatchLoop is
+	// controlCh's only reader; once Run has returned, nothing will ever
+	// drain a command a handler enqueues afterward, so SubmitControl/Save
+	// select on this too rather than hanging forever waiting on a reply
+	// that can now never arrive (a real deadlock this fixes — see
+	// ErrScanNotRunning's doc comment).
+	done chan struct{}
+
 	// cancel stops the scan on a CtrlStop command (spec §4: "stop = cancel"):
 	// Run() wraps its caller's ctx in a cancellable child and stores the
 	// cancel func here, so applyControl can trigger the exact same shutdown
@@ -393,6 +402,7 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		// it — an HTTP handler goroutine must never block on the coordinator
 		// being busy mid-dispatch.
 		controlCh:      make(chan ControlCmd, 32),
+		done:           make(chan struct{}),
 		concurrencyCap: int32(cfg.Concurrency),
 		workerCount:    cfg.Concurrency,
 	}
@@ -439,6 +449,7 @@ func (c *Coordinator) Run(ctx context.Context) {
 	// an outer ctx cancellation already does, without a second mechanism.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	defer close(c.done)
 	c.runCtx = runCtx
 	c.cancel = cancel
 	c.scanStart = time.Now()
@@ -1015,7 +1026,10 @@ func (c *Coordinator) handleHit(res WorkResult, cls Classification, dir string) 
 				break
 			}
 		}
-		c.emit(Event{Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence, Message: "alias"})
+		c.emit(Event{
+			Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence, Message: "alias",
+			Payload: payloadFor(HitPayload{Provenance: res.Item.Candidate.Provenance, Status: res.Signature.Status, Size: res.Signature.BodyLen}),
+		})
 		c.emit(Event{Type: EventBranchPruned, URL: url, Dir: dir, Message: "duplicate content (novelty gate): branch not recursed"})
 		return
 	}
@@ -1026,7 +1040,10 @@ func (c *Coordinator) handleHit(res WorkResult, cls Classification, dir string) 
 		Confidence: cls.Confidence, Provenance: res.Item.Candidate.Provenance,
 		ContentHash: hash,
 	})
-	c.emit(Event{Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence})
+	c.emit(Event{
+		Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence,
+		Payload: payloadFor(HitPayload{Provenance: res.Item.Candidate.Provenance, Status: res.Signature.Status, Size: res.Signature.BodyLen}),
+	})
 
 	c.learnFromHit(res, cls, dir) // spec §5: dirCtx + markov + assoc, confidence-gated (dynamic.go)
 
