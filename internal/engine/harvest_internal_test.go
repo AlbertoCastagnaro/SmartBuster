@@ -199,7 +199,7 @@ func TestSeedInjectCh_ConcurrentProducers_Race(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		co.sendWarning("wayback: simulated failure")
+		co.sendWarning("wayback", "wayback: simulated failure")
 	}()
 
 	wg.Wait()

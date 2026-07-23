@@ -90,6 +90,44 @@ func (f *Frontier) UpdateMatching(dir, path string, fn func(*Candidate)) bool {
 	return false
 }
 
+// All returns a copy of every resident candidate, in no particular order
+// (Phase 5a session save, spec §6: the frontier's full serializable form).
+func (f *Frontier) All() []Candidate {
+	return append(candidateHeap(nil), f.items...)
+}
+
+// RemoveMatching removes every queued candidate for which pred returns true
+// and returns them (spec §4.1's exclude override: swept out of the frontier
+// immediately, not just denylisted going forward). Re-heapifies once at the
+// end rather than per-removal, since a single exclude call can match many
+// candidates.
+func (f *Frontier) RemoveMatching(pred func(Candidate) bool) []Candidate {
+	var removed []Candidate
+	kept := make(candidateHeap, 0, len(f.items))
+	for _, c := range f.items {
+		if pred(c) {
+			removed = append(removed, c)
+		} else {
+			kept = append(kept, c)
+		}
+	}
+	f.items = kept
+	heap.Init(&f.items)
+	return removed
+}
+
+// TopK returns a copy of the k highest-Score queued candidates without
+// mutating the heap (spec §3's frontier.snapshot sampler calls this
+// periodically and must not disturb dispatch order).
+func (f *Frontier) TopK(k int) []Candidate {
+	items := append(candidateHeap(nil), f.items...)
+	sort.Slice(items, func(i, j int) bool { return items[i].Score > items[j].Score })
+	if len(items) > k {
+		items = items[:k]
+	}
+	return items
+}
+
 type candidateHeap []Candidate
 
 func (h candidateHeap) Len() int            { return len(h) }

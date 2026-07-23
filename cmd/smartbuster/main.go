@@ -4,18 +4,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/audit"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/corpus"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/daemon"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/engine"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/output"
@@ -35,6 +39,10 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		runScan(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
+	case "resume":
+		runResume(os.Args[2:])
 	case "ruleset":
 		runRuleset(os.Args[2:])
 	case "corpus":
@@ -50,6 +58,8 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: smartbuster scan <target> [<target>...] [-w <wordlist>] [flags]")
+	fmt.Fprintln(os.Stderr, "       smartbuster serve [--port <n>] [--open] [--bind <addr>]")
+	fmt.Fprintln(os.Stderr, "       smartbuster resume <session-file.json> [flags]")
 	fmt.Fprintln(os.Stderr, "       smartbuster ruleset update --repo <url> --commit <ref> [--dest <dir>]")
 	fmt.Fprintln(os.Stderr, "       smartbuster corpus build --seclists <path> [--source-map <file>] [--out <db>]")
 	fmt.Fprintln(os.Stderr, "       smartbuster corpus import <file> --tags <a,b,...> --type dir|file [--db <path>]")
@@ -259,6 +269,8 @@ func runScan(args []string) {
 	seed := fs.Int64("seed", 0, "RNG seed for reproducible runs; 0 = random, time-based")
 	dryRun := fs.Bool("dry-run", false, "print the requests that would be sent, without sending them")
 	outDir := fs.String("out", "smartbuster-out", "output directory for the audit log and result exports")
+	savePath := fs.String("save", "", "write a resumable session snapshot (spec §6) to this path, periodically while the scan runs (see --autosave)")
+	autosave := fs.Duration("autosave", 30*time.Second, "how often to write --save's snapshot; only takes effect when --save is set")
 
 	rulesetDir := fs.String("ruleset-dir", "", "system ruleset directory (overlays the embedded defaults); \"\" = embedded only")
 	userRulesDir := fs.String("user-rules-dir", "", "user ruleset overlay directory (highest precedence); \"\" = none")
@@ -361,6 +373,8 @@ func runScan(args []string) {
 		JSHarvest:        *jsHarvest,
 		Headless:         *headless,
 		CrawlDepth:       *crawlDepth,
+		SavePath:         *savePath,
+		Autosave:         *autosave,
 	}
 
 	if *dryRun {
@@ -455,6 +469,217 @@ func runDryRun(targets []string, entries []wordlist.Entry, cfg engine.Config, sc
 	}
 }
 
+// runServe implements `smartbuster serve` (spec §2, §7): binds the
+// loopback daemon, prints its URL with the session token, optionally opens
+// a browser, and serves REST + WS + the (5b) static asset mount until
+// interrupted.
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	port := fs.Int("port", 0, "port to listen on; 0 = OS-assigned")
+	bind := fs.String("bind", "127.0.0.1", "address to bind (spec §5: refused unless loopback, without --i-know-this-is-remote)")
+	open := fs.Bool("open", false, "launch a browser at the daemon's URL once it's listening")
+	iKnowThisIsRemote := fs.Bool("i-know-this-is-remote", false, "allow a non-loopback --bind (dangerous: this daemon can initiate scans against arbitrary hosts)")
+	sessionDir := fs.String("session-dir", "", "directory session files are saved to/listed from; \"\" = a per-user config directory")
+	fs.Parse(args)
+
+	d, err := daemon.Start(daemon.Options{
+		Bind: *bind, Port: *port, SessionDir: *sessionDir, AllowRemote: *iKnowThisIsRemote,
+	})
+	if err != nil {
+		fatalf("serve: %v", err)
+	}
+
+	fmt.Printf("smartbuster daemon listening on %s\n", d.URL)
+	fmt.Printf("open: %s\n", d.TokenURL)
+
+	if *open {
+		if err := openBrowser(d.TokenURL); err != nil {
+			fmt.Fprintf(os.Stderr, "smartbuster: --open: %v (open the URL above manually)\n", err)
+		}
+	}
+
+	if err := d.Serve(); err != nil {
+		fatalf("serve: %v", err)
+	}
+}
+
+// openBrowser shells out to the platform's "open this URL" command. Best
+// effort: serve already printed the URL, so a failure here just means the
+// user opens it by hand.
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd, args = "open", []string{url}
+	case "windows":
+		cmd, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
+	default:
+		cmd, args = "xdg-open", []string{url}
+	}
+	return exec.Command(cmd, args...).Start()
+}
+
+// runResume implements `smartbuster resume <session-file.json>` (spec §6):
+// rebuild the coordinator from a saved SessionState and continue scanning
+// — the CLI counterpart to POST /api/sessions/{id}/resume.
+func runResume(args []string) {
+	fs := flag.NewFlagSet("resume", flag.ExitOnError)
+	outDir := fs.String("out", "smartbuster-out", "output directory for the audit log and result exports")
+	savePath := fs.String("save", "", "write a resumable session snapshot (spec §6) to this path, periodically while the scan runs")
+	autosave := fs.Duration("autosave", 30*time.Second, "how often to write --save's snapshot; only takes effect when --save is set")
+	fs.Parse(args)
+
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: smartbuster resume <session-file.json> [flags]")
+		os.Exit(2)
+	}
+	sessionFile := fs.Arg(0)
+
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		fatalf("resume: %v", err)
+	}
+	var state engine.SessionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		fatalf("resume: %v", err)
+	}
+	state.Config.SavePath = *savePath
+	state.Config.Autosave = *autosave
+
+	var entries []wordlist.Entry
+	if state.Config.Wordlist != "" {
+		entries, err = wordlist.Load(state.Config.Wordlist)
+		if err != nil {
+			fatalf("resume: wordlist: %v", err)
+		}
+	}
+	sc := buildScope([]string{state.Target}, nil, nil, nil)
+
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		fatalf("output dir: %v", err)
+	}
+	auditWriter, err := audit.New(filepath.Join(*outDir, "audit.jsonl"))
+	if err != nil {
+		fatalf("audit log: %v", err)
+	}
+	defer auditWriter.Close()
+	if err := auditWriter.WriteHeader(audit.Header{
+		Version: version, Targets: []string{state.Target}, Wordlist: state.Config.Wordlist,
+		UserAgent: httpclient.DefaultUserAgent, Seed: state.Config.Seed,
+		Concurrency: state.Config.Concurrency, Rate: state.Config.Rate, Jitter: state.Config.Jitter,
+		MaxDepth: state.Config.MaxDepth, RequestTOMs: state.Config.RequestTO.Milliseconds(),
+	}); err != nil {
+		fatalf("audit log: %v", err)
+	}
+
+	co, err := engine.NewCoordinatorFromSnapshot(state, entries, sc,
+		engine.WithAuditSink(auditWriter), engine.WithEventEmitter(cliEmitter()))
+	if err != nil {
+		fatalf("resume: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	fmt.Printf("resuming %s from %s (seed=%d, %d findings so far)\n", state.Target, sessionFile, state.Config.Seed, len(state.Findings))
+	runWithAutosave(ctx, co, state.Config)
+
+	findings := co.Findings()
+	if err := writeResultFile(filepath.Join(*outDir, "results.json"), func(w io.Writer) error {
+		return output.WriteJSON(w, findings)
+	}); err != nil {
+		fatalf("results.json: %v", err)
+	}
+	if err := writeResultFile(filepath.Join(*outDir, "results.txt"), func(w io.Writer) error {
+		return output.WritePlaintext(w, findings)
+	}); err != nil {
+		fatalf("results.txt: %v", err)
+	}
+	fmt.Println()
+	output.WriteTree(os.Stdout, findings)
+}
+
+// cliEmitter is the console event printer shared by every CLI entry point
+// (scan, resume) — 5b's daemon has its own sink (the WS hub), so this is
+// specifically the terminal-facing one.
+func cliEmitter() engine.EventEmitter {
+	return engine.EventFunc(func(e engine.Event) {
+		switch e.Type {
+		case engine.EventHit:
+			fmt.Printf("[hit] %s (conf: %.2f) %s\n", e.URL, e.Confidence, e.Message)
+		case engine.EventWarning:
+			fmt.Printf("[warn] %s: %s\n", e.Dir, e.Message)
+		case engine.EventThrottle:
+			fmt.Printf("[throttle] %s\n", e.Message)
+		case engine.EventTrapDetected:
+			fmt.Printf("[trap] %s: %s\n", e.Dir, e.Message)
+		case engine.EventBranchPruned:
+			fmt.Printf("[pruned] %s: %s\n", e.Dir, e.Message)
+		case engine.EventError:
+			fmt.Printf("[error] %s: %s\n", e.URL, e.Message)
+		case engine.EventTechDetected:
+			for _, tech := range e.Tech {
+				fmt.Printf("[tech] %s (%s, conf: %.2f, layer: %s)\n", tech.Name, tech.Category, tech.Confidence, tech.Layer)
+			}
+		case engine.EventWAFDetected:
+			fmt.Printf("[waf] %s\n", e.WAF)
+		case engine.EventSPAPivot:
+			fmt.Printf("[spa.pivot] %s: brute-force deprioritized, harvesting root for the real API surface\n", e.URL)
+		}
+	})
+}
+
+// runWithAutosave runs co to completion, writing a session snapshot to
+// cfg.SavePath every cfg.Autosave interval while it runs (spec §7's CLI
+// --save/--autosave): the ticker goroutine stops the moment Run returns,
+// since co.Save (spec §6) only works while the coordinator's dispatchLoop
+// is still alive to service it.
+func runWithAutosave(ctx context.Context, co *engine.Coordinator, cfg engine.Config) {
+	if cfg.SavePath != "" && cfg.Autosave > 0 {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			ticker := time.NewTicker(cfg.Autosave)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					saveSession(co, cfg.SavePath)
+				}
+			}
+		}()
+	}
+	co.Run(ctx)
+}
+
+// saveSession writes one session snapshot to path (spec §6's on-disk
+// format: inspectable JSON, matching the audit ethos). Failures are
+// reported but non-fatal — a failed autosave shouldn't abort a scan that's
+// otherwise proceeding fine.
+func saveSession(co *engine.Coordinator, path string) {
+	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	state, err := co.Save(saveCtx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "smartbuster: session save: %v\n", err)
+		return
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "smartbuster: session save: %v\n", err)
+		return
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(state); err != nil {
+		fmt.Fprintf(os.Stderr, "smartbuster: session save: %v\n", err)
+	}
+}
+
 // scanOne runs one scan and returns its findings plus any additional
 // same-host web service base URLs nmap revealed (spec §7); the caller
 // decides whether to queue those for their own scan.
@@ -474,35 +699,14 @@ func scanOne(ctx context.Context, target string, entries []wordlist.Entry, cfg e
 		fatalf("audit log: %v", err)
 	}
 
-	emitter := engine.EventFunc(func(e engine.Event) {
-		switch e.Type {
-		case engine.EventHit:
-			fmt.Printf("[hit] %s (conf: %.2f) %s\n", e.URL, e.Confidence, e.Message)
-		case engine.EventWarning:
-			fmt.Printf("[warn] %s: %s\n", e.Dir, e.Message)
-		case engine.EventThrottle:
-			fmt.Printf("[throttle] %s\n", e.Message)
-		case engine.EventTrapDetected:
-			fmt.Printf("[trap] %s: %s\n", e.Dir, e.Message)
-		case engine.EventTechDetected:
-			for _, tech := range e.Tech {
-				fmt.Printf("[tech] %s (%s, conf: %.2f, layer: %s)\n", tech.Name, tech.Category, tech.Confidence, tech.Layer)
-			}
-		case engine.EventWAFDetected:
-			fmt.Printf("[waf] %s\n", e.WAF)
-		case engine.EventSPAPivot:
-			fmt.Printf("[spa.pivot] %s: brute-force deprioritized, harvesting root for the real API surface\n", e.URL)
-		}
-	})
-
 	co, err := engine.NewCoordinator(target, entries, cfg, sc,
-		engine.WithAuditSink(auditWriter), engine.WithEventEmitter(emitter))
+		engine.WithAuditSink(auditWriter), engine.WithEventEmitter(cliEmitter()))
 	if err != nil {
 		fatalf("%v", err)
 	}
 
 	fmt.Printf("scanning %s (seed=%d)\n", target, cfg.Seed)
-	co.Run(ctx)
+	runWithAutosave(ctx, co, cfg)
 
 	findings := co.Findings()
 	if err := writeResultFile(filepath.Join(outDir, "results.json"), func(w io.Writer) error {

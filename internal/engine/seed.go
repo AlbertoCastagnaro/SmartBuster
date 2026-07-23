@@ -33,20 +33,20 @@ func (c *Coordinator) seedPassiveSync(ctx context.Context) {
 	if c.config.Robots {
 		res, err := seed.FetchRobots(ctx, c.target, c.seedOpts())
 		if err != nil {
-			c.emit(Event{Type: EventWarning, Message: "robots: " + err.Error()})
+			c.emitWarning("robots", "robots: "+err.Error())
 		}
 		raws = append(raws, res.Seeds...)
 		if c.config.Sitemap {
 			seeds, err := c.fetchSitemapSeeds(ctx, res.Sitemaps)
 			if err != nil {
-				c.emit(Event{Type: EventWarning, Message: "sitemap: " + err.Error()})
+				c.emitWarning("sitemap", "sitemap: "+err.Error())
 			}
 			raws = append(raws, seeds...)
 		}
 	} else if c.config.Sitemap {
 		seeds, err := c.fetchSitemapSeeds(ctx, nil)
 		if err != nil {
-			c.emit(Event{Type: EventWarning, Message: "sitemap: " + err.Error()})
+			c.emitWarning("sitemap", "sitemap: "+err.Error())
 		}
 		raws = append(raws, seeds...)
 	}
@@ -76,7 +76,7 @@ func (c *Coordinator) seedWaybackAsync(ctx context.Context) {
 		w := &seed.Wayback{BaseURL: c.config.WaybackURL, Max: c.config.WaybackMax, Pace: c.archivePace}
 		raws, err := w.Fetch(ctx, c.profileState.Host)
 		if err != nil {
-			c.sendWarning("wayback: " + err.Error())
+			c.sendWarning("wayback", "wayback: "+err.Error())
 			return
 		}
 		if len(raws) == 0 {
@@ -298,8 +298,9 @@ func (c *Coordinator) mergeOrEnqueueGenerated(dir string, cand Candidate) bool {
 // the producer goroutine so every c.emit() call, like every frontier
 // mutation, stays exclusively on the coordinator goroutine.
 type SeedBatch struct {
-	Seeds   []seed.Seed
-	Warning string
+	Seeds      []seed.Seed
+	Warning    string
+	WarnSource string // WarnPayload.Source for Warning (spec §3 decision #2); set by whichever producer called sendWarning
 }
 
 // applySeedBatch is seedInjectCh's sole consumer (spec §5) — the coordinator
@@ -310,7 +311,7 @@ type SeedBatch struct {
 // (mergeOrEnqueueGenerated above), so no separate merge logic belongs here.
 func (c *Coordinator) applySeedBatch(batch SeedBatch) {
 	if batch.Warning != "" {
-		c.emit(Event{Type: EventWarning, Message: batch.Warning})
+		c.emitWarning(batch.WarnSource, batch.Warning)
 	}
 	for _, sd := range c.capBatch(batch.Seeds) {
 		c.enqueueSeed(sd)
@@ -341,8 +342,8 @@ func (c *Coordinator) capBatch(seeds []seed.Seed) []seed.Seed {
 			}
 		}
 		if len(newDirs) > harvest.MaxNewDirsPerBatch {
-			c.emit(Event{Type: EventWarning, Message: fmt.Sprintf(
-				"seed.capped: batch truncated to %d/%d seeds (MAX_NEW_DIRS_PER_BATCH=%d)", i, len(sorted), harvest.MaxNewDirsPerBatch)})
+			c.emitWarning("seed.capped", fmt.Sprintf(
+				"seed.capped: batch truncated to %d/%d seeds (MAX_NEW_DIRS_PER_BATCH=%d)", i, len(sorted), harvest.MaxNewDirsPerBatch))
 			return sorted[:i]
 		}
 	}
@@ -363,8 +364,8 @@ func (c *Coordinator) sendSeedBatch(seeds []seed.Seed) {
 	c.injectBatch(SeedBatch{Seeds: seeds})
 }
 
-func (c *Coordinator) sendWarning(msg string) {
-	c.injectBatch(SeedBatch{Warning: msg})
+func (c *Coordinator) sendWarning(source, msg string) {
+	c.injectBatch(SeedBatch{Warning: msg, WarnSource: source})
 }
 
 func (c *Coordinator) injectBatch(batch SeedBatch) {

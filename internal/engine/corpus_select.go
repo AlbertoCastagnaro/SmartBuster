@@ -80,7 +80,7 @@ func (c *Coordinator) loadCorpusTemplate() {
 	}
 	db, err := c.openCorpusDB()
 	if err != nil {
-		c.emit(Event{Type: EventWarning, Message: "corpus: " + err.Error()})
+		c.emitWarning("corpus", "corpus: "+err.Error())
 		return
 	}
 	defer db.Close()
@@ -89,7 +89,7 @@ func (c *Coordinator) loadCorpusTemplate() {
 		DB: db, MaxCandidates: c.config.CorpusMax, TechBoostW: c.techBoostW,
 	})
 	if err != nil {
-		c.emit(Event{Type: EventWarning, Message: "corpus: " + err.Error()})
+		c.emitWarning("corpus", "corpus: "+err.Error())
 		return
 	}
 	c.corpusTemplate = corpus.Expand(cands, c.profileState, c.techBoostW)
@@ -184,6 +184,7 @@ func (c *Coordinator) scoreCandidate(cand Candidate) float64 {
 	if c.spaMode && !isHarvestProvenance(cand.Provenance) {
 		score *= SPABruteForceScoreDown
 	}
+	score *= c.overrideMultiplier(&cand) // spec §4.1: pin/boost/demote
 	return score
 }
 

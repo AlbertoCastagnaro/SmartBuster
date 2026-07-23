@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -59,6 +62,7 @@ type dirState struct {
 
 	wildcardSuspect bool // §10: hit-rate trap -> stop recursing this branch
 	capped          bool // §10: tarpit trap -> stop dispatching this branch
+	budgetPruned    bool // spec §3 decision #3: guards branch.pruned(budget) to fire once per dir, at the first over-budget discard
 
 	recentHits    []bool
 	recentElapsed []time.Duration
@@ -194,6 +198,46 @@ type Coordinator struct {
 	targetHost        string // c.target's own host; the crawler/JS harvester's same-host filter (spec §3, §4)
 	crawlDepth        int    // spec §7 CrawlDepth; resolved once at construction, 0 -> MaxDepth
 	spaMode           bool   // spec §4: set once by the SPA pivot; deprioritizes (not purges) brute-force candidates for the rest of the scan
+
+	// Phase 5a telemetry (spec §3): scanStart anchors ElapsedMs; statsReqSent/
+	// statsHits are coordinator-wide counters (unlike ds.requestsDispatched,
+	// which is per-directory) driving the periodic stats event.
+	scanStart    time.Time
+	statsReqSent int
+	statsHits    int
+
+	// controlCh is Phase 5a's manual-override entry point (spec §0 contract
+	// C, §4): REST/CLI handlers send a ControlCmd here; only the coordinator
+	// goroutine ever reads it or applies one, preserving the same
+	// single-writer invariant seedInjectCh already gives the frontier.
+	// Buffered so a handler's send never blocks on the coordinator being
+	// mid-dispatch; commands are still applied strictly one at a time, in
+	// arrival order, by dispatchLoop's own select case.
+	controlCh chan ControlCmd
+	paused    bool
+	overrides []override // spec §4.1: pin/exclude/boost/demote, checked by scoreCandidate/isExcluded
+
+	// cancel stops the scan on a CtrlStop command (spec §4: "stop = cancel"):
+	// Run() wraps its caller's ctx in a cancellable child and stores the
+	// cancel func here, so applyControl can trigger the exact same shutdown
+	// path an outer ctx cancellation already does, rather than inventing a
+	// second one.
+	cancel context.CancelFunc
+
+	// concurrencyCap/workerCount/workersWG back PATCH .../concurrency (spec
+	// §4): concurrencyCap is the live dispatch gate dispatchLoop checks
+	// before every dispatch (atomic: read from the coordinator goroutine
+	// only, but kept atomic for symmetry/future-proofing); workerCount is
+	// how many RunWorker goroutines have been spawned so far — raising the
+	// cap above it spawns the shortfall; lowering it never kills goroutines,
+	// it just throttles future dispatch (see applyAdjust).
+	concurrencyCap int32
+	workerCount    int
+	workersWG      *sync.WaitGroup
+	harvestEnabled bool
+	mode           string // spec §4 PATCH's Mode: stored/reported only — no engine behavior keys off it yet (see handoff deviations)
+
+	resumed bool // spec §6: set by NewCoordinatorFromSnapshot — Run() skips profileTarget/seedRoot/seedPassiveSync/... and continues from restored state instead
 }
 
 // NewCoordinator builds a Coordinator for a single target. sc must not be
@@ -343,6 +387,14 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		crawlVisited:   &visitedSet{seen: make(map[string]bool)},
 		targetHost:     targetHost,
 		crawlDepth:     crawlDepth,
+
+		// Buffered (spec §4, contract C): a control command only needs to be
+		// queued for the coordinator to apply in order, never rendezvous with
+		// it — an HTTP handler goroutine must never block on the coordinator
+		// being busy mid-dispatch.
+		controlCh:      make(chan ControlCmd, 32),
+		concurrencyCap: int32(cfg.Concurrency),
+		workerCount:    cfg.Concurrency,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -382,25 +434,41 @@ func PreviewRequests(target string, wl []wordlist.Entry, seed int64) []string {
 // are spawned and joined here; Run does not return until every worker
 // goroutine has exited.
 func (c *Coordinator) Run(ctx context.Context) {
-	c.runCtx = ctx
+	// Wrapped in a cancellable child (spec §4: "stop = cancel") so a
+	// mid-scan CtrlStop command can trigger exactly the same shutdown path
+	// an outer ctx cancellation already does, without a second mechanism.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.runCtx = runCtx
+	c.cancel = cancel
+	c.scanStart = time.Now()
 	c.emit(Event{Type: EventScanStarted, URL: c.target})
-	c.profileTarget(ctx) // spec §0 contract B: before any real dispatch
-	c.seedRoot()
-	c.seedPassiveSync(ctx)   // Phase 4a: robots/sitemap (spec §2) — root already exists, so pendingSeeds has somewhere to land
-	c.seedWaybackAsync(ctx)  // Phase 4b contract H: off the critical path, delivered via seedInjectCh mid-scan
-	c.seedHeadlessAsync(ctx) // Phase 4b §6: opt-in, off the critical path like Wayback
+	if c.resumed {
+		// spec §6: a resumed scan already has its tree/frontier/baselines/
+		// profile restored (restoreSnapshot) — re-running profileTarget
+		// would re-fetch from the network and duplicate work seedRoot/
+		// seedPassiveSync would just collide with restored dirs for.
+		c.emitWarning("profile", "resumed session: continuing from saved state, skipping re-profiling and re-seeding")
+	} else {
+		c.profileTarget(runCtx) // spec §0 contract B: before any real dispatch
+		c.seedRoot()
+		c.seedPassiveSync(runCtx)   // Phase 4a: robots/sitemap (spec §2) — root already exists, so pendingSeeds has somewhere to land
+		c.seedWaybackAsync(runCtx)  // Phase 4b contract H: off the critical path, delivered via seedInjectCh mid-scan
+		c.seedHeadlessAsync(runCtx) // Phase 4b §6: opt-in, off the critical path like Wayback
+	}
 
-	harvestEnabled := c.config.Crawl || c.config.JSHarvest
+	c.harvestEnabled = c.config.Crawl || c.config.JSHarvest
 	var wg sync.WaitGroup
+	c.workersWG = &wg
 	for i := 0; i < c.config.Concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			RunWorker(ctx, c.workCh, c.resultsCh, c.client, harvestEnabled)
+			RunWorker(runCtx, c.workCh, c.resultsCh, c.client, c.harvestEnabled)
 		}()
 	}
 
-	c.dispatchLoop(ctx)
+	c.dispatchLoop(runCtx)
 
 	close(c.workCh)
 	wg.Wait()
@@ -409,6 +477,14 @@ func (c *Coordinator) Run(ctx context.Context) {
 }
 
 func (c *Coordinator) dispatchLoop(ctx context.Context) {
+	// The two Phase 5a telemetry tickers (spec §3): fired from this same
+	// single select loop, so StatsPayload/SnapshotPayload reads of
+	// coordinator state never race with a mutation.
+	statsTicker := time.NewTicker(StatsInterval)
+	defer statsTicker.Stop()
+	snapshotTicker := time.NewTicker(SnapshotInterval)
+	defer snapshotTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,11 +495,25 @@ func (c *Coordinator) dispatchLoop(ctx context.Context) {
 			c.applySeedBatch(batch)
 		case url := <-c.harvestFetchCh:
 			c.enqueueHarvestFetch(url)
+		case cmd := <-c.controlCh:
+			c.applyControl(cmd)
+		case <-statsTicker.C:
+			c.emitStats()
+		case <-snapshotTicker.C:
+			c.emitSnapshot()
 		case <-c.pacer.C():
-			if item, ok := c.nextDispatchable(); ok {
-				c.inFlight++
-				if !c.dispatch(ctx, item) {
-					return // ctx cancelled while trying to hand off item
+			// Pause (spec §4: "gate dispatch, drain in-flight") and the
+			// live concurrency cap (PATCH .../concurrency) both act here,
+			// at the sole dispatch point — everything else in this select
+			// (result handling, seed/harvest injection, control commands)
+			// keeps running so in-flight requests still drain while paused.
+			if !c.paused && c.inFlight < c.concurrencyLimit() {
+				if item, ok := c.nextDispatchable(); ok {
+					c.inFlight++
+					c.statsReqSent++
+					if !c.dispatch(ctx, item) {
+						return // ctx cancelled while trying to hand off item
+					}
 				}
 			}
 			c.pacer.Advance()
@@ -469,7 +559,21 @@ func (c *Coordinator) emit(e Event) {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
+	if e.Category == "" {
+		e.Category = eventCategories[e.Type]
+	}
 	c.emitter.Emit(e)
+}
+
+// emitWarning is EventWarning's one construction point (spec §3 decision
+// #2): every warning names its source via a WarnPayload, never a message
+// prefix, so the UI can group/filter on structured data.
+func (c *Coordinator) emitWarning(source, message string) {
+	c.emit(Event{Type: EventWarning, Message: message, Payload: payloadFor(WarnPayload{Source: source})})
+}
+
+func (c *Coordinator) emitWarningDir(dir, source, message string) {
+	c.emit(Event{Type: EventWarning, Dir: dir, Message: message, Payload: payloadFor(WarnPayload{Source: source})})
 }
 
 // nextDispatchable implements the coordinator's priority (spec §3):
@@ -534,12 +638,16 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 			continue
 		}
 		if ds.capped || ds.requestsDispatched >= ds.budget {
+			if ds.requestsDispatched >= ds.budget && !ds.budgetPruned {
+				ds.budgetPruned = true
+				c.emit(Event{Type: EventBranchPruned, Dir: ds.path, Message: "PER_DIR_BUDGET reached; remaining candidates discarded"})
+			}
 			ds.candidatesAccountedFor++
 			c.maybeFinishDir(ds)
 			continue
 		}
 		url := c.target + cand.ParentDir + "/" + cand.Path
-		if !c.scope.InScope(url) {
+		if !c.scope.InScope(url) || c.isExcluded(cand.ParentDir, cand.Path) {
 			ds.candidatesAccountedFor++
 			c.maybeFinishDir(ds)
 			continue
@@ -702,7 +810,7 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 
 	c.emit(Event{Type: EventCalibrationDone, Dir: dir})
 	if baseline.IsSPA {
-		c.emit(Event{Type: EventWarning, Dir: dir, Message: "brute-force likely futile: SPA catch-all"})
+		c.emitWarningDir(dir, "spa", "brute-force likely futile: SPA catch-all")
 	}
 
 	// The root baseline is what the error-page signal and active-probe
@@ -730,7 +838,7 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 		// hasn't run yet at this point).
 		if newExts := c.profileState.ExtensionsForStack(); extSetGrew(c.extSet, newExts) {
 			c.extSet = newExts
-			c.emit(Event{Type: EventWarning, Dir: dir, Message: "profile refinement grew the extension set; re-calibrating root"})
+			c.emitWarningDir(dir, "profile", "profile refinement grew the extension set; re-calibrating root")
 			c.startCalibration(dir, ds.depth, ds.branchStart)
 			return
 		}
@@ -842,6 +950,8 @@ func (c *Coordinator) handleReal(res WorkResult) {
 			Time: time.Now(), Method: "GET", URL: res.Item.URL, ParentDir: dir,
 			Provenance: res.Item.Candidate.Provenance, Err: res.Err,
 		})
+		c.emit(Event{Type: EventError, URL: res.Item.URL, Dir: dir, Message: res.Err.Error(),
+			Payload: payloadFor(ErrorPayload{URL: res.Item.URL, Kind: classifyRequestErr(res.Err), Message: res.Err.Error()})})
 		if ds != nil {
 			ds.candidatesAccountedFor++
 			c.maybeFinishDir(ds)
@@ -896,6 +1006,7 @@ func (c *Coordinator) handleHit(res WorkResult, cls Classification, dir string) 
 	url := res.Item.URL
 	hash := res.Signature.RawBodyHash
 
+	c.statsHits++
 	if existing, ok := c.seenContent[hash]; ok {
 		c.seenContent[hash] = append(existing, url)
 		for i := range c.findings {
@@ -905,6 +1016,7 @@ func (c *Coordinator) handleHit(res WorkResult, cls Classification, dir string) 
 			}
 		}
 		c.emit(Event{Type: EventHit, URL: url, Dir: dir, Confidence: cls.Confidence, Message: "alias"})
+		c.emit(Event{Type: EventBranchPruned, URL: url, Dir: dir, Message: "duplicate content (novelty gate): branch not recursed"})
 		return
 	}
 
@@ -1029,6 +1141,7 @@ func (c *Coordinator) checkTarpit(ds *dirState) {
 	if medianDuration(ds.recentElapsed) >= time.Duration(0.9*float64(c.config.RequestTO)) {
 		ds.capped = true
 		c.emit(Event{Type: EventTrapDetected, Dir: ds.path, Message: "tarpit-suspect: response times near timeout, branch capped"})
+		c.emit(Event{Type: EventBranchPruned, Dir: ds.path, Message: "tarpit cap: branch dispatch stopped"})
 	}
 }
 
@@ -1097,6 +1210,34 @@ func appendCappedDuration(buf []time.Duration, v time.Duration, max int) []time.
 		buf = buf[len(buf)-max:]
 	}
 	return buf
+}
+
+// classifyRequestErr buckets a request error into ErrorPayload.Kind (spec
+// §3 decision #3) for a UI to filter/count on, without needing to parse
+// err.Error() text.
+func classifyRequestErr(err error) string {
+	var tlsErr tls.RecordHeaderError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &tlsErr):
+		return "tls"
+	case errors.Is(err, net.ErrClosed):
+		return "connreset"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "connection reset"), strings.Contains(msg, "broken pipe"), strings.Contains(msg, "EOF"):
+		return "connreset"
+	case strings.Contains(msg, "tls"), strings.Contains(msg, "x509"), strings.Contains(msg, "certificate"):
+		return "tls"
+	default:
+		return "other"
+	}
 }
 
 func medianDuration(vals []time.Duration) time.Duration {

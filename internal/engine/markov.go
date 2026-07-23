@@ -66,6 +66,48 @@ func (m *MarkovModel) Train(segment string) {
 	m.trained++
 }
 
+// MarkovState is MarkovModel's serializable form (Phase 5a session
+// save/resume, spec §6): round-tripping this must reproduce convSignal's
+// output exactly for every segment.
+type MarkovState struct {
+	Order      int
+	MinSamples int
+	Counts     map[string]map[byte]int
+	Totals     map[string]int
+	Trained    int
+}
+
+// MarshalState snapshots m's trained n-gram counts.
+func (m *MarkovModel) MarshalState() MarkovState {
+	counts := make(map[string]map[byte]int, len(m.counts))
+	for ctx, byCh := range m.counts {
+		cp := make(map[byte]int, len(byCh))
+		for ch, n := range byCh {
+			cp[ch] = n
+		}
+		counts[ctx] = cp
+	}
+	totals := make(map[string]int, len(m.totals))
+	for ctx, n := range m.totals {
+		totals[ctx] = n
+	}
+	return MarkovState{Order: m.order, MinSamples: m.minSamples, Counts: counts, Totals: totals, Trained: m.trained}
+}
+
+// LoadState replaces m's trained state with s (order/minSamples were
+// already set at construction from Config and are not overwritten here —
+// they're identical across a save/resume boundary since Config round-trips
+// verbatim).
+func (m *MarkovModel) LoadState(s MarkovState) {
+	if s.Counts != nil {
+		m.counts = s.Counts
+	}
+	if s.Totals != nil {
+		m.totals = s.Totals
+	}
+	m.trained = s.Trained
+}
+
 // convSignal returns segment's likelihood under the model, in [0,1] (spec
 // §3.3). Cold-start guard: neutral 0 until minSamples confirmed segments
 // have been trained — a model trained on a couple of paths is noise.

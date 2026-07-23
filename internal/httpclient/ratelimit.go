@@ -42,6 +42,24 @@ func (l *Limiter) Unbounded() bool {
 	return l.rate <= 0
 }
 
+// SetRate live-adjusts the pacing rate (Phase 5a's PATCH .../{id}: spec §4).
+// Not goroutine-safe, same as the rest of Limiter — callers must be the
+// coordinator goroutine that already owns it exclusively.
+func (l *Limiter) SetRate(rate float64) {
+	l.rate = rate
+}
+
+// BackoffState/SetBackoffState round-trip a Limiter's WAF-onset backoff
+// window (Phase 5a session save/resume, spec §6's "wafState").
+func (l *Limiter) BackoffState() (multiplier float64, until time.Time) {
+	return l.backoffMultiplier, l.backoffUntil
+}
+
+func (l *Limiter) SetBackoffState(multiplier float64, until time.Time) {
+	l.backoffMultiplier = multiplier
+	l.backoffUntil = until
+}
+
 // NextInterval returns the jittered wait duration until the next dispatch
 // slot, drawing the jitter factor from rng. If a backoff window is active
 // (see TriggerBackoff), the interval is scaled by the backoff factor.

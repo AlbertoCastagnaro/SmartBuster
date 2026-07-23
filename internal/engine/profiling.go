@@ -112,7 +112,7 @@ func (c *Coordinator) ingestNmap(ctx context.Context) {
 		data, err = os.ReadFile(c.config.NmapFile)
 	}
 	if err != nil {
-		c.emit(Event{Type: EventWarning, Message: "nmap: " + err.Error()})
+		c.emitWarning("nmap", "nmap: "+err.Error())
 		return
 	}
 
@@ -120,10 +120,10 @@ func (c *Coordinator) ingestNmap(ctx context.Context) {
 		return c.scope.InScope("https://" + host + "/")
 	})
 	for _, w := range warnings {
-		c.emit(Event{Type: EventWarning, Message: w})
+		c.emitWarning("nmap", w)
 	}
 	if err != nil {
-		c.emit(Event{Type: EventWarning, Message: "nmap: " + err.Error()})
+		c.emitWarning("nmap", "nmap: "+err.Error())
 		return
 	}
 

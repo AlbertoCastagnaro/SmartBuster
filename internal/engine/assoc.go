@@ -129,6 +129,40 @@ func (a *AssocEngine) RecordHit(dir, path string) {
 	}
 }
 
+// AssocState is AssocEngine's serializable form (Phase 5a session
+// save/resume, spec §6): only the session-local confirmed-hit tracking —
+// the hand-curated companion table is re-loaded from the embedded YAML at
+// construction, identical every time, so it's not part of the round trip.
+type AssocState struct {
+	HitTerms map[string]map[string]bool
+	HitExts  map[string]map[string]bool
+}
+
+func (a *AssocEngine) MarshalState() AssocState {
+	return AssocState{HitTerms: deepCopyStringSetMap(a.hitTerms), HitExts: deepCopyStringSetMap(a.hitExts)}
+}
+
+func (a *AssocEngine) LoadState(s AssocState) {
+	if s.HitTerms != nil {
+		a.hitTerms = s.HitTerms
+	}
+	if s.HitExts != nil {
+		a.hitExts = s.HitExts
+	}
+}
+
+func deepCopyStringSetMap(m map[string]map[string]bool) map[string]map[string]bool {
+	out := make(map[string]map[string]bool, len(m))
+	for k, set := range m {
+		cp := make(map[string]bool, len(set))
+		for s := range set {
+			cp[s] = true
+		}
+		out[k] = cp
+	}
+	return out
+}
+
 // assocSignal is spec §3.2's reweight: 1.0 if c is a companion (via the
 // hand-curated table, or the optional mined table) of a confirmed hit in the
 // same directory; a smaller "extension pivot" boost (spec §3.2's "found

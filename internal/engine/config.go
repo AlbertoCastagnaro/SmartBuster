@@ -78,6 +78,13 @@ type Config struct {
 	JSHarvest  bool
 	Headless   bool
 	CrawlDepth int // 0 = MaxDepth
+
+	// Phase 5a session save/resume (spec §7). SavePath/Autosave are CLI-only
+	// (the daemon's own save path is POST .../save's request body, spec
+	// §4) — a periodic autosave writes SessionState to SavePath every
+	// Autosave interval while the scan runs; 0 disables it.
+	SavePath string
+	Autosave time.Duration
 }
 
 // ScoreWeights are the Phase 3 dynamic-signal weights (spec §7): Boost
@@ -118,4 +125,15 @@ const (
 	// reorder-not-exclude). Brute-force candidates stay dispatchable, just
 	// far behind harvested ones once root calibrates as an SPA.
 	SPABruteForceScoreDown = 0.1
+
+	// Phase 5a telemetry cadence (spec §7).
+	StatsInterval    = 400 * time.Millisecond
+	SnapshotInterval = 1 * time.Second
+	SnapshotTopK     = 25
+
+	// PinScore is the manual pin override's forced-boost factor (spec §4.1:
+	// "force-try + top priority"): scoreCandidate multiplies by this, well
+	// above every other scoring tier (corpus priors are ~0-5, nmapSeedScore
+	// is 2.0), so a pinned candidate always sorts first.
+	PinScore = 1000.0
 )

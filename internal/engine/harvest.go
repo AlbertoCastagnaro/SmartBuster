@@ -39,6 +39,30 @@ func (v *visitedSet) markVisited(url string) bool {
 	return true
 }
 
+// snapshot/restore round-trip the visited set (Phase 5a session save/
+// resume, spec §6's "visitedSets"): called only while no harvest producer
+// goroutine is running concurrently — buildSnapshot runs on the coordinator
+// goroutine via controlCh (contract C), and restoreSnapshot runs before
+// Run() ever spawns one — so the mutex here is a guard-rail, not something
+// either path strictly needs.
+func (v *visitedSet) snapshot() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]string, 0, len(v.seen))
+	for k := range v.seen {
+		out = append(out, k)
+	}
+	return out
+}
+
+func (v *visitedSet) restore(keys []string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, k := range keys {
+		v.seen[k] = true
+	}
+}
+
 // harvestResponse is handleReal's Phase 4b hook (spec §2, §3): a retained
 // body gets handed to a tracked background producer goroutine for parsing —
 // never parsed inline, since LinkFinder-style regex over a multi-MiB bundle
@@ -191,7 +215,12 @@ func (c *Coordinator) handleHarvestFetchResult(res WorkResult) {
 		Time: time.Now(), Method: "GET", URL: res.Item.URL, Provenance: "harvest-fetch",
 		Signature: res.Signature, Err: res.Err,
 	})
-	if res.Err != nil || res.Signature.HarvestBody == nil {
+	if res.Err != nil {
+		c.emit(Event{Type: EventError, URL: res.Item.URL, Message: res.Err.Error(),
+			Payload: payloadFor(ErrorPayload{URL: res.Item.URL, Kind: classifyRequestErr(res.Err), Message: res.Err.Error()})})
+		return
+	}
+	if res.Signature.HarvestBody == nil {
 		return
 	}
 	fetchedURL, body := res.Item.URL, res.Signature.HarvestBody
@@ -239,12 +268,12 @@ func (c *Coordinator) seedHeadlessAsync(ctx context.Context) {
 	c.spawnHarvest(func() {
 		runner, err := harvest.NewPlaywrightRunner()
 		if err != nil {
-			c.sendWarning("headless: " + err.Error())
+			c.sendWarning("headless", "headless: "+err.Error())
 			return
 		}
 		urls, err := runner.Capture(ctx, c.target+"/", nil)
 		if err != nil {
-			c.sendWarning("headless: " + err.Error())
+			c.sendWarning("headless", "headless: "+err.Error())
 			return
 		}
 		var raws []seed.RawSeed
