@@ -93,7 +93,7 @@ func (c *Coordinator) fetchSitemapSeeds(ctx context.Context, extraSitemaps []str
 }
 
 func (c *Coordinator) seedOpts() seed.Options {
-	return seed.Options{Client: c.client, InScope: c.scope.InScope, Pace: c.paceProfileRequest}
+	return seed.Options{Client: c.httpClient, InScope: c.scope.InScope, Pace: c.paceProfileRequest}
 }
 
 // archivePace waits one archivePacer tick — the *separate* archive.org

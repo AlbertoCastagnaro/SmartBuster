@@ -118,6 +118,9 @@ func (c *Coordinator) popNext() (Candidate, bool) {
 	if c.frontier.Empty() {
 		return Candidate{}, false
 	}
+	if c.orderJitter {
+		return c.frontier.PopBand(c.orderJitterRNG, orderJitterBand), true
+	}
 	return c.frontier.Pop(), true
 }
 

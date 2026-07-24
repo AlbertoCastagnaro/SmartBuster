@@ -23,6 +23,19 @@ type Config struct {
 	PerDirBudget  int           // 0 = default to wordlist size (spec §13 PER_DIR_BUDGET)
 	TimePerBranch time.Duration // 0 = disabled (spec §13 default)
 
+	// Phase 6a modes, timing & request shape (spec §2, §8). Mode selects a
+	// Preset (fast|normal|quiet|stealth; "" defaults to "normal"); Rate/
+	// Jitter/Concurrency/Epsilon above still override individual preset
+	// fields when explicitly set (see ResolvePreset) — Mode doesn't replace
+	// them, it just supplies their defaults. Budget (--budget) is
+	// time-budget pacing: 0 disables it, otherwise the scan's target rate
+	// is recomputed periodically as remainingFrontier/remainingTime so it
+	// spreads over Budget regardless of frontier size.
+	Mode          string        // --mode; default "normal"
+	Budget        time.Duration // --budget; 0 = off (time-budget pacing)
+	JitterKind    string        // override preset's JitterSpec.Kind
+	HeaderProfile string        // override preset's header profile
+
 	// Phase 2a target profiling (spec §8).
 	RulesetDir   string   // system ruleset dir; "" = embedded defaults only
 	UserRulesDir string   // user overlay dir; "" = none
@@ -102,9 +115,6 @@ const (
 	RecurseMinConf  = 0.7 // min confidence to recurse into a directory
 	WildcardHitRate = 0.9 // branch hit-rate that flags a wildcard trap
 
-	BackoffFactor = 4.0
-	BackoffWindow = 30 * time.Second
-
 	// Phase 3 defaults (spec §7).
 	DefaultWSem   = 1.5
 	DefaultWAssoc = 1.0
@@ -130,6 +140,11 @@ const (
 	StatsInterval    = 400 * time.Millisecond
 	SnapshotInterval = 1 * time.Second
 	SnapshotTopK     = 25
+
+	// AIMDTickInterval is how often dispatchLoop polls the AIMD recovery
+	// controller and time-budget pacing (Phase 6a spec §3, §4) — coarse on
+	// purpose, since neither needs per-request precision.
+	AIMDTickInterval = 1 * time.Second
 
 	// PinScore is the manual pin override's forced-boost factor (spec §4.1:
 	// "force-try + top priority"): scoreCandidate multiplies by this, well

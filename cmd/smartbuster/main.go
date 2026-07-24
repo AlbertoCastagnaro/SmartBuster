@@ -261,9 +261,13 @@ func splitFlagsAndPositional(args []string, boolFlags map[string]bool) (flagArgs
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	wordlistPath := fs.String("w", "", "path to a flat wordlist file; bypasses the corpus and tags every entry \"generic\" (spec §0 contract G). \"\" = use the tagged corpus (default)")
-	concurrency := fs.Int("c", engine.DefaultConcurrency, "number of concurrent workers")
-	rate := fs.Float64("rate", 0, "max requests/sec across all workers; 0 = unbounded")
-	jitter := fs.Float64("jitter", httpclient.DefaultJitter, "fractional jitter applied to the pacing interval")
+	mode := fs.String("mode", "normal", "stealth tier preset: fast|normal|quiet|stealth (spec §2); individual flags below override the selected preset's fields")
+	concurrency := fs.Int("c", 0, "number of concurrent workers; 0 = the selected --mode's own default")
+	rate := fs.Float64("rate", 0, "max requests/sec across all workers; 0 = the selected --mode's own default (unbounded for fast/normal)")
+	jitter := fs.Float64("jitter", 0, "fractional uniform jitter applied to the pacing interval; 0 = the selected --mode's own jitter distribution")
+	jitterKind := fs.String("jitter-kind", "", "override the selected --mode's jitter distribution kind: none|uniform|gaussian|bursty")
+	headerProfile := fs.String("header-profile", "", "override the selected --mode's header profile: minimal|chrome|firefox|safari")
+	budget := fs.Duration("budget", 0, "spread the scan over roughly this much wall-clock time (time-budget pacing, spec §3); 0 = off")
 	maxDepth := fs.Int("depth", engine.DefaultMaxDepth, "max recursion depth")
 	requestTO := fs.Duration("timeout", engine.DefaultRequestTO, "per-request timeout")
 	seed := fs.Int64("seed", 0, "RNG seed for reproducible runs; 0 = random, time-based")
@@ -292,7 +296,7 @@ func runScan(args []string) {
 	markovMinSamples := fs.Int("markov-min-samples", engine.DefaultMarkovMinSamples, "MARKOV_MIN_SAMPLES: cold-start threshold before the naming-convention signal activates")
 	learnMinConf := fs.Float64("learn-min-conf", engine.DefaultLearnMinConf, "LEARN_MIN_CONF: min confidence for a hit to feed the dynamic learners (poisoning defense)")
 	subtreeBurst := fs.Int("subtree-burst", engine.DefaultSubtreeBurst, "SUBTREE_BURST: consecutive requests a directory may run before yielding to another")
-	epsilon := fs.Float64("epsilon", engine.DefaultEpsilon, "EPSILON: ε-greedy exploration probability; 0 = pure greedy (e.g. stealth modes)")
+	epsilon := fs.Float64("epsilon", 0, "EPSILON: ε-greedy exploration probability; 0 = pure greedy (every mode's default — exploration ties randomness to live dispatch timing, breaking seed reproducibility, so it's opt-in only)")
 	reprioHits := fs.Int("reprio-hits", engine.DefaultReprioHits, "REPRIO_INTERVAL: reprioritize the frontier after this many qualifying hits")
 	reprioInterval := fs.Duration("reprio-interval", engine.DefaultReprioInterval, "REPRIO_INTERVAL: or after this much elapsed time, whichever first")
 
@@ -351,6 +355,7 @@ func runScan(args []string) {
 
 	cfg := engine.Config{
 		Targets: targets, Wordlist: *wordlistPath, Concurrency: *concurrency,
+		Mode: *mode, Budget: *budget, JitterKind: *jitterKind, HeaderProfile: *headerProfile,
 		Rate: *rate, Jitter: *jitter, MaxDepth: *maxDepth, RequestTO: *requestTO,
 		Seed: *seed, DryRun: *dryRun, OutDir: *outDir,
 		RulesetDir: *rulesetDir, UserRulesDir: *userRulesDir, RulesOff: rulesOff,

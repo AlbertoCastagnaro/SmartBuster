@@ -4,6 +4,7 @@ package httpclient
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -24,8 +25,45 @@ type Config struct {
 	UserAgent      string
 }
 
+// Request is what a caller asks an HTTPDoer to fetch (Phase 6a §6's client
+// boundary): Headers is the full header set to apply (a header profile plus
+// any per-request Referer, already merged by the caller) — net/http's
+// Header is an unordered map, so faithful header *ordering* isn't attempted
+// here; that's 6b's job once a tls-client implementation can actually honor
+// it (spec §5 scope note).
+type Request struct {
+	URL     string
+	Headers http.Header
+}
+
+// Response is an HTTPDoer's result. Body is the live response body stream —
+// callers read it capped and close it, exactly as they did with the raw
+// *http.Response before this boundary existed.
+type Response struct {
+	StatusCode int
+	Header     http.Header
+	Body       io.ReadCloser
+	Elapsed    time.Duration
+}
+
+// Cookies parses Set-Cookie headers, mirroring *http.Response.Cookies() —
+// a callers-need-it convenience so the profile package's cookie inspection
+// doesn't need its own header-parsing/http.Response construction.
+func (r Response) Cookies() []*http.Cookie {
+	return (&http.Response{Header: r.Header}).Cookies()
+}
+
+// HTTPDoer is the seam Phase 6b swaps a tls-client implementation behind
+// (spec §6), selected by the active preset's TLSProfile/Proxies fields
+// (unused in 6a). Client below is the only implementation in 6a — today's
+// stock net/http behavior, unchanged.
+type HTTPDoer interface {
+	Do(ctx context.Context, req Request) (Response, error)
+}
+
 // Client wraps a tuned *http.Client. Redirects are never auto-followed —
-// the 30x response itself is classified by calibration.
+// the 30x response itself is classified by calibration. Client implements
+// HTTPDoer.
 type Client struct {
 	http      *http.Client
 	userAgent string
@@ -73,17 +111,29 @@ func New(cfg Config) *Client {
 	}
 }
 
-// Do issues a GET request against url and returns the response, elapsed
-// time, and error. On success the caller must close resp.Body.
-func (c *Client) Do(ctx context.Context, url string) (*http.Response, time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// Do issues a GET request against req.URL and returns the response and
+// elapsed time. On success the caller must close resp.Body. req.Headers, if
+// set, becomes the request's full header set (a header profile plus any
+// per-request Referer — see package httpclient's headers.go); otherwise
+// Client falls back to its own configured UserAgent alone, matching pre-6a
+// (the "minimal" profile's) behavior.
+func (c *Client) Do(ctx context.Context, req Request) (Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
 	if err != nil {
-		return nil, 0, err
+		return Response{}, err
 	}
-	req.Header.Set("User-Agent", c.userAgent)
+	if req.Headers != nil {
+		httpReq.Header = req.Headers.Clone()
+	}
+	if httpReq.Header.Get("User-Agent") == "" {
+		httpReq.Header.Set("User-Agent", c.userAgent)
+	}
 
 	start := time.Now()
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(httpReq)
 	elapsed := time.Since(start)
-	return resp, elapsed, err
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: resp.Body, Elapsed: elapsed}, nil
 }

@@ -36,7 +36,7 @@ type ProfileResponse struct {
 func Fetch(ctx context.Context, client *httpclient.Client, target string) (*ProfileResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, ProfileFetchTimeout)
 	defer cancel()
-	resp, _, err := client.Do(ctx, target)
+	resp, err := client.Do(ctx, httpclient.Request{URL: target})
 	if err != nil {
 		return nil, err
 	}

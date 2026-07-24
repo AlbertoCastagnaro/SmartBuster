@@ -136,15 +136,21 @@ func (c *Coordinator) applyControl(cmd ControlCmd) {
 	}
 }
 
-// applyAdjust implements PATCH .../{id} (spec §4): rate takes effect on the
-// Limiter immediately; concurrency raises the live dispatch cap and, if
-// that's now above how many RunWorker goroutines exist, spawns the
-// shortfall (lowering it never kills a goroutine — see the concurrencyCap
-// field doc on Coordinator). mode is stored for status reporting only; no
-// engine behavior keys off it yet (handoff deviation).
+// applyAdjust implements PATCH .../{id} (spec §4): mode is applied first —
+// a full live preset swap (spec §2: pacer distribution + rate, header
+// profile, backoff, epsilon) — so an explicit rate/concurrency given in the
+// *same* PATCH still wins over whatever the new preset would have set,
+// matching "explicit flags override individual fields on top." concurrency
+// raises the live dispatch cap and, if that's now above how many RunWorker
+// goroutines exist, spawns the shortfall (lowering it never kills a
+// goroutine — see the concurrencyCap field doc on Coordinator).
 func (c *Coordinator) applyAdjust(cmd ControlCmd) {
+	if cmd.SetMode != nil {
+		c.mode = *cmd.SetMode
+		c.applyPreset(PresetFor(*cmd.SetMode))
+	}
 	if cmd.SetRate != nil {
-		c.limiter.SetRate(*cmd.SetRate)
+		c.limiter.SetRateCap(*cmd.SetRate)
 	}
 	if cmd.SetConcurrency != nil && *cmd.SetConcurrency > 0 {
 		atomic.StoreInt32(&c.concurrencyCap, int32(*cmd.SetConcurrency))
@@ -158,9 +164,6 @@ func (c *Coordinator) applyAdjust(cmd ControlCmd) {
 			}
 			c.workerCount = *cmd.SetConcurrency
 		}
-	}
-	if cmd.SetMode != nil {
-		c.mode = *cmd.SetMode
 	}
 }
 

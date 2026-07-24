@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"net/http"
+
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/types"
 )
 
@@ -50,6 +52,13 @@ type WorkItem struct {
 	IsProbe        bool   // calibration probe vs. real candidate
 	ProbeTag       string // groups probes belonging to one directory
 	IsHarvestFetch bool   // Phase 4b: a JS-bundle or SPA-pivot root fetch requested by a harvest producer (spec §4, §5) — dispatched through the same paced pipeline as ordinary candidates, routed by content-type once the result comes back (see handleHarvestFetchResult)
+
+	// Headers is the full request header set (profile + referer, spec §5),
+	// computed once by the coordinator at construction time (buildHeaders)
+	// so the worker stays a stateless (item, network) -> WorkResult
+	// executor — it never reads mode/profile/referer policy itself, only
+	// forwards whatever the coordinator already decided.
+	Headers http.Header
 }
 
 type WorkResult struct {

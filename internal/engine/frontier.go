@@ -72,6 +72,40 @@ func (f *Frontier) SampleMidTier(rng *rand.Rand) (Candidate, bool) {
 	return c, true
 }
 
+// orderJitterBand is spec §5's "near-equal scores" tolerance for
+// PopBand: candidates scoring within this fraction of the current max are
+// eligible for the seeded shuffle, not just the single highest-scoring one.
+const orderJitterBand = 0.05
+
+// PopBand pops a candidate chosen uniformly at random (from rng) among
+// those currently within orderJitterBand of the frontier's max Score (spec
+// §5's OrderJitter): a seeded tie-break among near-equal top candidates,
+// not a full reshuffle — priority dispatch still goes to the top tier, just
+// not always to literally the single highest scorer within it. Falls back
+// to a strict Pop when there's nothing to jitter between (0 or 1 items, or
+// a non-positive max score, where a fractional band isn't meaningful).
+func (f *Frontier) PopBand(rng *rand.Rand, bandFrac float64) Candidate {
+	n := len(f.items)
+	if n <= 1 {
+		return f.Pop()
+	}
+	max := f.items[0].Score // heap root: always the current max
+	if max <= 0 {
+		return f.Pop()
+	}
+	thresh := max * (1 - bandFrac)
+	band := make([]int, 0, 4)
+	for i, it := range f.items {
+		if it.Score >= thresh {
+			band = append(band, i)
+		}
+	}
+	idx := band[rng.Intn(len(band))]
+	c := f.items[idx]
+	heap.Remove(&f.items, idx)
+	return c
+}
+
 // UpdateMatching finds the still-queued candidate at (dir, path) — if any —
 // applies fn to it in place, and re-heapifies just that element. Returns
 // false if no such candidate is currently queued (already dispatched, or

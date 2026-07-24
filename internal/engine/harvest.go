@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/harvest"
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/seed"
 )
 
@@ -202,7 +203,10 @@ func (c *Coordinator) enqueueHarvestFetch(rawURL string) {
 	if !c.crawlVisited.markVisited(rawURL) {
 		return
 	}
-	c.harvestFetchQueue = append(c.harvestFetchQueue, WorkItem{URL: rawURL, IsHarvestFetch: true})
+	c.harvestFetchQueue = append(c.harvestFetchQueue, WorkItem{
+		URL: rawURL, IsHarvestFetch: true,
+		Headers: httpclient.BuildHeaders(c.headerProfile.Load(), ""), // no referer chain for harvest fetches (spec §5 only covers ordinary candidates)
+	})
 }
 
 // handleHarvestFetchResult is handleResult's branch for a completed harvest

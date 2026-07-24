@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -67,6 +68,12 @@ type dirState struct {
 	recentHits    []bool
 	recentElapsed []time.Duration
 
+	// baselineElapsedMedian is this directory's typical response latency,
+	// from its own calibration probes — the AIMD controller's "latency
+	// spike vs. baseline" trigger (spec §4) compares real dispatches
+	// against it, reusing a signal calibration already paid for.
+	baselineElapsedMedian time.Duration
+
 	// knownPaths dedupes Phase 3 generated candidates (spec §3.2, §6)
 	// against whatever's already known for this directory — the initial
 	// template push, plus anything already generated.
@@ -114,10 +121,18 @@ type Coordinator struct {
 	wordlist []wordlist.Entry
 	scope    *scope.Scope
 
-	client  *httpclient.Client
-	limiter *httpclient.Limiter
-	pacer   *httpclient.Pacer
-	rng     *rand.Rand
+	client httpclient.HTTPDoer // spec §6 client boundary: net/http today, a tls-client impl behind the stealth preset in 6b; RunWorker's only dependency
+	// httpClient is the same underlying client as the concrete *httpclient.Client
+	// type — kept alongside the HTTPDoer interface field above because
+	// profile/seed's on-target-but-not-candidate requests (target
+	// profiling, robots/sitemap, active-probe confirmation) are outside
+	// this phase's HTTPDoer boundary (spec §6 scopes 6a's swap to the
+	// worker's candidate requests only) and already depend on the concrete
+	// type's exact signature.
+	httpClient *httpclient.Client
+	limiter    *httpclient.Limiter
+	pacer      *httpclient.Pacer
+	rng        *rand.Rand
 
 	frontier         *Frontier
 	dirs             map[string]*dirState
@@ -244,7 +259,24 @@ type Coordinator struct {
 	workerCount    int
 	workersWG      *sync.WaitGroup
 	harvestEnabled bool
-	mode           string // spec §4 PATCH's Mode: stored/reported only — no engine behavior keys off it yet (see handoff deviations)
+	mode           string // spec §4 PATCH's Mode; Phase 6a makes this live — see applyPreset
+
+	// Phase 6a modes, timing & request shape (spec §0 contract D, §2-§6).
+	// headerProfile is read by every worker per-dispatch (atomic: written
+	// only by the coordinator goroutine on a mode switch, read from
+	// whichever goroutine builds a WorkItem's headers — always the
+	// coordinator goroutine too, in fact, but kept atomic for the same
+	// symmetry/future-proofing reason concurrencyCap is). orderJitterRNG is
+	// its own seeded stream (like epsilonRNG/archivePacer's rng) so a mode's
+	// OrderJitter shuffle doesn't perturb any other RNG-consuming signal's
+	// sequence.
+	headerProfile  *httpclient.ProfileState
+	refererEnabled bool
+	orderJitter    bool
+	orderJitterRNG *rand.Rand
+	backoffSpec    BackoffSpec
+	budget         time.Duration
+	budgetDeadline time.Time
 
 	resumed bool // spec §6: set by NewCoordinatorFromSnapshot — Run() skips profileTarget/seedRoot/seedPassiveSync/... and continues from restored state instead
 }
@@ -268,9 +300,6 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		return nil, fmt.Errorf("wordlist is empty")
 	}
 
-	if cfg.Concurrency <= 0 {
-		cfg.Concurrency = DefaultConcurrency
-	}
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = DefaultMaxDepth
 	}
@@ -278,11 +307,24 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		cfg.RequestTO = DefaultRequestTO
 	}
 
+	// Phase 6a modes (spec §2, §8): Mode selects a Preset ("" -> "normal"),
+	// and cfg's own Rate/Jitter/Concurrency/Epsilon/JitterKind/HeaderProfile
+	// override individual preset fields on top. cfg.Concurrency is
+	// overwritten with the resolved value here — every use of it below
+	// (worker pool size, channel buffering, workerCount) sees the effective
+	// concurrency, whether that came from the preset or an explicit flag.
+	mode := cfg.Mode
+	if mode == "" {
+		mode = "normal"
+	}
+	preset := ResolvePreset(mode, cfg)
+	cfg.Concurrency = preset.Concurrency
+
 	client := httpclient.New(httpclient.Config{
 		Concurrency:    cfg.Concurrency,
 		RequestTimeout: cfg.RequestTO,
 	})
-	limiter := httpclient.NewLimiter(cfg.Rate, cfg.Jitter)
+	limiter := httpclient.NewLimiterSpec(preset.RateCap, preset.Jitter)
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	pacer := httpclient.NewPacer(limiter, rng)
 
@@ -356,6 +398,7 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		wordlist:    wl,
 		scope:       sc,
 		client:      client,
+		httpClient:  client,
 		limiter:     limiter,
 		pacer:       pacer,
 		rng:         rng,
@@ -377,12 +420,20 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		markovMinSamples: markovMinSamples,
 		learnMinConf:     learnMinConf,
 		subtreeBurst:     subtreeBurst,
-		epsilon:          cfg.Epsilon,
+		epsilon:          preset.Epsilon,
 		epsilonRNG:       dirRand(cfg.Seed, "\x00__epsilon__"),
 		reprioHits:       reprioHits,
 		reprioInterval:   reprioInterval,
 
 		archivePacer: archivePacer,
+
+		mode:           mode,
+		headerProfile:  httpclient.NewProfileState(preset.HeaderProfile),
+		refererEnabled: preset.Referer,
+		orderJitter:    preset.OrderJitter,
+		orderJitterRNG: dirRand(cfg.Seed, "\x00__orderjitter__"),
+		backoffSpec:    preset.Backoff,
+		budget:         cfg.Budget,
 
 		// Deliberately unbuffered: a producer's send must only complete once
 		// the coordinator is synchronously receiving (and, for seedInjectCh,
@@ -453,6 +504,9 @@ func (c *Coordinator) Run(ctx context.Context) {
 	c.runCtx = runCtx
 	c.cancel = cancel
 	c.scanStart = time.Now()
+	if c.budget > 0 {
+		c.budgetDeadline = c.scanStart.Add(c.budget)
+	}
 	c.emit(Event{Type: EventScanStarted, URL: c.target})
 	if c.resumed {
 		// spec §6: a resumed scan already has its tree/frontier/baselines/
@@ -495,6 +549,12 @@ func (c *Coordinator) dispatchLoop(ctx context.Context) {
 	defer statsTicker.Stop()
 	snapshotTicker := time.NewTicker(SnapshotInterval)
 	defer snapshotTicker.Stop()
+	// Phase 6a's AIMD recovery (spec §4) and time-budget pacing (spec §3)
+	// both just need a coarse periodic recompute, not per-request precision
+	// — one shared ticker keeps dispatchLoop's select from growing a case
+	// per timing concern.
+	sixATicker := time.NewTicker(AIMDTickInterval)
+	defer sixATicker.Stop()
 
 	for {
 		select {
@@ -512,6 +572,9 @@ func (c *Coordinator) dispatchLoop(ctx context.Context) {
 			c.emitStats()
 		case <-snapshotTicker.C:
 			c.emitSnapshot()
+		case <-sixATicker.C:
+			c.maybeRecoverBackoff()
+			c.updateBudgetPacing()
 		case <-c.pacer.C():
 			// Pause (spec §4: "gate dispatch, drain in-flight") and the
 			// live concurrency cap (PATCH .../concurrency) both act here,
@@ -673,7 +736,7 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 		for _, h := range held {
 			c.frontier.Push(h)
 		}
-		return WorkItem{Candidate: cand, URL: url}, true
+		return WorkItem{Candidate: cand, URL: url, Headers: c.buildHeaders(cand.ParentDir)}, true
 	}
 
 	// Frontier exhausted without finding a different directory to
@@ -689,9 +752,46 @@ func (c *Coordinator) nextDispatchable() (WorkItem, bool) {
 		url := c.target + cand.ParentDir + "/" + cand.Path
 		c.recordDispatch(cand.ParentDir)
 		ds.requestsDispatched++
-		return WorkItem{Candidate: cand, URL: url}, true
+		return WorkItem{Candidate: cand, URL: url, Headers: c.buildHeaders(cand.ParentDir)}, true
 	}
 	return WorkItem{}, false
+}
+
+// refererFor implements spec §5's referer chains, when the active preset's
+// Referer is enabled: a recursion child's referer is its parent directory;
+// a root-level candidate's is the site root. Returns "" (no Referer header
+// at all) when Referer is off — the default for fast/normal.
+func (c *Coordinator) refererFor(dir string) string {
+	if !c.refererEnabled {
+		return ""
+	}
+	if dir == "" {
+		return c.target + "/"
+	}
+	return c.target + dir + "/"
+}
+
+// buildHeaders computes one WorkItem's full header set: the scan's stable
+// per-session profile (spec §5 — never rotated per request, only ever
+// changed by an explicit mode switch) plus this request's referer.
+func (c *Coordinator) buildHeaders(dir string) http.Header {
+	return httpclient.BuildHeaders(c.headerProfile.Load(), c.refererFor(dir))
+}
+
+// applyPreset live-reconfigures every preset-governed knob at once (spec
+// §2: "coordinator applies the preset live — reconfigure pacer distribution
+// + rate, swap header profile, set backoff/epsilon"). Concurrency isn't
+// applied here: PATCH already has its own dedicated SetConcurrency field
+// (applyAdjust), so a mode switch never implicitly resizes the worker pool
+// out from under a concurrent PATCH in the same request.
+func (c *Coordinator) applyPreset(p Preset) {
+	c.limiter.SetRateCap(p.RateCap)
+	c.limiter.SetJitterSpec(p.Jitter)
+	c.headerProfile.Store(p.HeaderProfile)
+	c.orderJitter = p.OrderJitter
+	c.refererEnabled = p.Referer
+	c.backoffSpec = p.Backoff
+	c.epsilon = p.Epsilon
 }
 
 func (c *Coordinator) maybeFinishDir(ds *dirState) {
@@ -719,6 +819,7 @@ func (c *Coordinator) startCalibration(dir string, depth int, branchStart time.T
 	c.calibratingOrder = append(c.calibratingOrder, dir)
 
 	rng := dirRand(c.config.Seed, dir)
+	headers := c.buildHeaders(dir)
 	for _, ext := range c.extSet {
 		for i := 0; i < calibration.NProbes; i++ {
 			token := randToken(rng, 12)
@@ -737,6 +838,7 @@ func (c *Coordinator) startCalibration(dir string, depth int, branchStart time.T
 					Depth:      depth,
 					Provenance: "probe",
 				},
+				Headers: headers,
 			})
 		}
 	}
@@ -807,7 +909,6 @@ func (c *Coordinator) collectProbe(res WorkResult) {
 	if res.Err == nil {
 		ds.probeResults = append(ds.probeResults, res.Signature)
 	}
-
 	if ds.probesDone >= ds.probesTotal {
 		c.finishCalibration(dir, ds)
 	}
@@ -818,6 +919,12 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 	c.baselines[dir] = &baseline
 	c.removeCalibratingDir(dir)
 	ds.state = dirScanning
+
+	elapsed := make([]time.Duration, len(ds.probeResults))
+	for i, p := range ds.probeResults {
+		elapsed[i] = p.Elapsed
+	}
+	ds.baselineElapsedMedian = medianDuration(elapsed)
 
 	c.emit(Event{Type: EventCalibrationDone, Dir: dir})
 	if baseline.IsSPA {
@@ -836,7 +943,7 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 	if dir == "" && c.profileState != nil && !c.rootRefined {
 		c.rootRefined = true
 		c.profileState.IsSPA = baseline.IsSPA
-		profile.RefineAfterCalibration(c.runCtx, c.client, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
+		profile.RefineAfterCalibration(c.runCtx, c.httpClient, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
 		c.reprioritizeIfChanged() // spec §7(b): RefineAfterCalibration mutated the profile
 		c.emitTechDetected()
 
@@ -988,6 +1095,7 @@ func (c *Coordinator) handleReal(res WorkResult) {
 	if ds != nil {
 		ds.recentElapsed = appendCappedDuration(ds.recentElapsed, res.Signature.Elapsed, tarpitWindow)
 		c.checkTarpit(ds)
+		c.checkLatencySpike(ds, res.Signature.Elapsed)
 	}
 
 	if cls.IsHit {
@@ -1162,9 +1270,12 @@ func (c *Coordinator) checkTarpit(ds *dirState) {
 	}
 }
 
-// detectWAFOnset is the minimal Phase 1 ring-buffer detector (spec §6.4): a
-// spike of 429/403s, or a run of responses that match neither any baseline
-// nor prior findings, triggers a temporary pacing backoff.
+// detectWAFOnset is the ring-buffer detector (spec §6.4, upgraded to feed
+// Phase 6a's AIMD controller per spec §4): a spike of 429/403s, or a run of
+// responses that match neither any baseline nor prior findings, triggers a
+// pacing backoff. dir's own latency-spike-vs-baseline check (the AIMD
+// controller's third reused trigger) lives in handleReal, right where the
+// per-directory baseline it compares against is already in scope.
 func (c *Coordinator) detectWAFOnset(res WorkResult) {
 	sig := res.Signature
 	novel := !c.matchesAnyBaselineOrFinding(sig)
@@ -1204,13 +1315,82 @@ func (c *Coordinator) matchesAnyBaselineOrFinding(sig ResponseSignature) bool {
 	return false
 }
 
-func (c *Coordinator) triggerBackoff() {
-	now := time.Now()
-	if c.limiter.InBackoff(now) {
+// latencySpikeThreshold is how far a real response's elapsed time must
+// exceed its directory's calibration-baseline median before it counts as
+// the AIMD controller's "latency spike vs. baseline" trigger (spec §4) —
+// loose enough that ordinary variance doesn't false-trigger, tight enough
+// to catch a WAF's slow-path challenge page. minLatencyBaselineForSpike is
+// a floor below which the check is skipped entirely: a sub-50ms baseline
+// (routine against a local/fast target) is too noisy for a 3x relative
+// multiplier to mean anything — ordinary scheduling jitter alone can triple
+// a sub-millisecond median — whereas a real WAF challenge's slowdown is
+// practically always well above this floor in absolute terms.
+const (
+	latencySpikeThreshold      = 3.0
+	minLatencyBaselineForSpike = 50 * time.Millisecond
+)
+
+// checkLatencySpike is handleReal's hook for the AIMD controller's third
+// reused trigger (spec §4): a directory's calibration probes already give a
+// per-dir baseline elapsed time for free, so this costs no extra requests.
+func (c *Coordinator) checkLatencySpike(ds *dirState, elapsed time.Duration) {
+	if ds == nil || ds.baselineElapsedMedian < minLatencyBaselineForSpike {
 		return
 	}
-	c.limiter.TriggerBackoff(BackoffFactor, BackoffWindow, now)
+	if elapsed > time.Duration(latencySpikeThreshold*float64(ds.baselineElapsedMedian)) {
+		c.triggerBackoff()
+	}
+}
+
+// triggerBackoff applies the active preset's AIMD multiplicative decrease
+// (spec §4): a no-op when the preset's Backoff isn't Enabled (fast mode),
+// and gated by InBackoff so a whole spike's worth of ring samples don't
+// each compound their own decrease — one trigger per onset, then recovery
+// takes over.
+func (c *Coordinator) triggerBackoff() {
+	if !c.backoffSpec.Enabled {
+		return
+	}
+	now := time.Now()
+	if c.limiter.InBackoff(now, c.backoffSpec.RecoveryWindow) {
+		return
+	}
+	c.limiter.TriggerBackoff(c.backoffSpec.Decrease, now)
 	c.emit(Event{Type: EventThrottle, Message: "WAF/rate-limit onset detected; backing off"})
+}
+
+// maybeRecoverBackoff is the AIMD controller's additive-increase half (spec
+// §4), polled from dispatchLoop's sixATicker: once a clean window has
+// passed since the last trigger, the rate steps back up toward the
+// preset's RateCap, and a "throttle-recovered" warning fires the moment it
+// gets there.
+func (c *Coordinator) maybeRecoverBackoff() {
+	if !c.backoffSpec.Enabled {
+		return
+	}
+	if c.limiter.MaybeRecover(c.backoffSpec.Step, c.backoffSpec.RecoveryWindow, time.Now()) {
+		c.emitWarning("throttle-recovered", "backoff recovered to configured rate cap")
+	}
+}
+
+// updateBudgetPacing implements time-budget pacing (spec §3): with --budget
+// T set, the target rate is recomputed as remainingFrontier/remainingTime
+// on every tick, so the scan spreads over T regardless of how the frontier
+// grows or shrinks. A no-op when Budget is off (the common case).
+func (c *Coordinator) updateBudgetPacing() {
+	if c.budget <= 0 {
+		return
+	}
+	remaining := time.Until(c.budgetDeadline)
+	if remaining <= 0 {
+		c.limiter.SetRateCap(0) // budget's already spent: stop pacing, finish as fast as possible
+		return
+	}
+	frontierLen := c.frontier.Len() + len(c.harvestFetchQueue)
+	if frontierLen == 0 {
+		return
+	}
+	c.limiter.SetRateCap(float64(frontierLen) / remaining.Seconds())
 }
 
 func appendCappedBool(buf []bool, v bool, max int) []bool {

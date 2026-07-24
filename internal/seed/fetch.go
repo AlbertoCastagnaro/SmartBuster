@@ -36,7 +36,7 @@ func inScope(opts Options, rawURL string) bool {
 // fetchBody issues one GET and returns its body (capped to maxSeedBody) and
 // status code.
 func fetchBody(ctx context.Context, client *httpclient.Client, target string) ([]byte, int, error) {
-	resp, _, err := client.Do(ctx, target)
+	resp, err := client.Do(ctx, httpclient.Request{URL: target})
 	if err != nil {
 		return nil, 0, err
 	}

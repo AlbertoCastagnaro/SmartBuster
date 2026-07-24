@@ -68,18 +68,23 @@ type SessionState struct {
 
 	Profile *profile.TargetProfile `json:"profile,omitempty"`
 
-	Markov MarkovState            `json:"markov"`
-	Assoc  AssocState             `json:"assoc"`
-	DirCtx map[string]DirContext  `json:"dir_ctx"`
+	Markov MarkovState           `json:"markov"`
+	Assoc  AssocState            `json:"assoc"`
+	DirCtx map[string]DirContext `json:"dir_ctx"`
 
 	VisitedSet []string `json:"visited_set"`
 
 	StatsReqSent int `json:"stats_req_sent"`
 	StatsHits    int `json:"stats_hits"`
 
-	WAFRing           []WAFSample `json:"waf_ring"`
-	BackoffMultiplier float64     `json:"backoff_multiplier"`
-	BackoffUntil      time.Time   `json:"backoff_until"`
+	WAFRing []WAFSample `json:"waf_ring"`
+
+	// AIMD adaptive-rate state (Phase 6a upgrade of spec §6's "wafState"):
+	// the Limiter's current rate plus enough of its trigger bookkeeping to
+	// resume mid-backoff/mid-recovery exactly where a live scan left off.
+	AIMDRate        float64   `json:"aimd_rate"`
+	AIMDLastTrigger time.Time `json:"aimd_last_trigger"`
+	AIMDTriggered   bool      `json:"aimd_triggered"`
 
 	NmapSeeds   []profile.NmapSeed `json:"nmap_seeds"`
 	SPAMode     bool               `json:"spa_mode"`
@@ -165,7 +170,7 @@ func (c *Coordinator) buildSnapshot() SessionState {
 	for i, s := range c.wafRing {
 		wafRing[i] = WAFSample{Status: s.status, Novel: s.novel}
 	}
-	backoffMult, backoffUntil := c.limiter.BackoffState()
+	aimdRate, aimdLastTrigger, aimdTriggered := c.limiter.AIMDState()
 
 	return SessionState{
 		Version: SessionVersion, Target: c.target, Config: c.config, SavedAt: time.Now(),
@@ -175,8 +180,11 @@ func (c *Coordinator) buildSnapshot() SessionState {
 		Markov:  markovState, Assoc: assocState, DirCtx: dirCtx,
 		VisitedSet:   c.crawlVisited.snapshot(),
 		StatsReqSent: c.statsReqSent, StatsHits: c.statsHits,
-		WAFRing: wafRing, BackoffMultiplier: backoffMult, BackoffUntil: backoffUntil,
-		NmapSeeds: append([]profile.NmapSeed(nil), c.nmapSeeds...), SPAMode: c.spaMode, RootRefined: c.rootRefined,
+		WAFRing:         wafRing,
+		AIMDRate:        aimdRate,
+		AIMDLastTrigger: aimdLastTrigger,
+		AIMDTriggered:   aimdTriggered,
+		NmapSeeds:       append([]profile.NmapSeed(nil), c.nmapSeeds...), SPAMode: c.spaMode, RootRefined: c.rootRefined,
 	}
 }
 
@@ -278,7 +286,7 @@ func (c *Coordinator) restoreSnapshot(state SessionState) {
 	for i, s := range state.WAFRing {
 		c.wafRing[i] = wafSample{status: s.Status, novel: s.Novel}
 	}
-	c.limiter.SetBackoffState(state.BackoffMultiplier, state.BackoffUntil)
+	c.limiter.SetAIMDState(state.AIMDRate, state.AIMDLastTrigger, state.AIMDTriggered)
 
 	c.nmapSeeds = append([]profile.NmapSeed(nil), state.NmapSeeds...)
 	c.spaMode = state.SPAMode

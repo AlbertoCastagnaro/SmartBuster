@@ -18,7 +18,7 @@ import (
 
 func fetchSignature(t *testing.T, client *httpclient.Client, rawURL, token string) ResponseSignature {
 	t.Helper()
-	resp, elapsed, err := client.Do(context.Background(), rawURL)
+	resp, err := client.Do(context.Background(), httpclient.Request{URL: rawURL})
 	if err != nil {
 		t.Fatalf("request %s: %v", rawURL, err)
 	}
@@ -34,7 +34,7 @@ func fetchSignature(t *testing.T, client *httpclient.Client, rawURL, token strin
 		SimHash:     simhash.SimHash(Shingles(norm)),
 		RedirectTo:  testNormalizeRedirect(resp.Header.Get("Location")),
 		ContentType: testMediaType(resp.Header.Get("Content-Type")),
-		Elapsed:     elapsed,
+		Elapsed:     resp.Elapsed,
 	}
 }
 

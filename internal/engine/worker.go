@@ -23,8 +23,11 @@ import (
 // both while idle (waiting on workCh) and while trying to hand back a result.
 // harvestEnabled is scan-wide (Config.Crawl || Config.JSHarvest) and gates
 // body retention for ordinary candidate responses (spec §2); it never
-// changes over a scan's lifetime, so passing it once here is enough.
-func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- WorkResult, client *httpclient.Client, harvestEnabled bool) {
+// changes over a scan's lifetime, so passing it once here is enough. client
+// is the spec §6 HTTPDoer boundary — net/http today, a tls-client
+// implementation behind the stealth preset in Phase 6b — so the worker
+// itself never depends on the concrete transport.
+func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- WorkResult, client httpclient.HTTPDoer, harvestEnabled bool) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,12 +46,13 @@ func RunWorker(ctx context.Context, workCh <-chan WorkItem, resultsCh chan<- Wor
 	}
 }
 
-func process(ctx context.Context, item WorkItem, client *httpclient.Client, harvestEnabled bool) WorkResult {
-	resp, elapsed, err := client.Do(ctx, item.URL)
+func process(ctx context.Context, item WorkItem, client httpclient.HTTPDoer, harvestEnabled bool) WorkResult {
+	resp, err := client.Do(ctx, httpclient.Request{URL: item.URL, Headers: item.Headers})
 	if err != nil {
 		return WorkResult{Item: item, Err: err}
 	}
 	defer resp.Body.Close()
+	elapsed := resp.Elapsed
 
 	ct := mediaType(resp)
 
@@ -151,7 +155,7 @@ func normalizeRedirect(location string) string {
 	return p
 }
 
-func mediaType(resp *http.Response) string {
+func mediaType(resp httpclient.Response) string {
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		return ""
