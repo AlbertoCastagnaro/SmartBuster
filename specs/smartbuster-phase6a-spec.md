@@ -2,15 +2,6 @@
 
 *Build-ready spec for the first two stealth tiers on the existing HTTP client: mode presets, jitter distributions, adaptive backoff, realistic header profiles, and making `mode` live. Plus the deferred rate-guarantee rigor audit. Tier 3 (TLS/HTTP-2 fingerprint mimicry + proxies) is Phase 6b. Read alongside the implementation plan (Phase 6) and the stealth design discussion (three-tier model).*
 
----
-
-## 0. Do this first: the pre-6 protocol patch
-
-Before 6a, land the four 5b-surfaced fixes (all small, orthogonal to stealth):
-- **Control deadlock**: `Run()` closes a `done` channel on exit; `SubmitControl` selects `controlCh <- cmd` **or** `<-done → ErrScanNotRunning`; daemon maps to `409`. (The live bug — do first.)
-- **Enrich `hit`**: add `HitPayload{Provenance, Status, Size}` in `Event.Payload`; retire the snapshot back-fill.
-- **Findings endpoint**: `GET /api/scans/{id}/findings → []Finding` (also the Phase 7 export accessor).
-- De-flake `TestHub_HitFloodCoalescesForStalledClient` (deterministic sync).
 
 ## 1. Integration contract — verify against committed code
 
