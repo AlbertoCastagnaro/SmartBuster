@@ -18,7 +18,7 @@ const maxSeedBody = 5 << 20 // 5 MiB
 // request already goes through (spec §0 contract D/E). Mirrors
 // profile.Options, which the same coordinator already builds one of.
 type Options struct {
-	Client  *httpclient.Client
+	Client  httpclient.HTTPDoer
 	InScope func(rawURL string) bool
 	Pace    func() // called before each on-target request; nil = unpaced (e.g. direct unit tests)
 }
@@ -35,7 +35,7 @@ func inScope(opts Options, rawURL string) bool {
 
 // fetchBody issues one GET and returns its body (capped to maxSeedBody) and
 // status code.
-func fetchBody(ctx context.Context, client *httpclient.Client, target string) ([]byte, int, error) {
+func fetchBody(ctx context.Context, client httpclient.HTTPDoer, target string) ([]byte, int, error) {
 	resp, err := client.Do(ctx, httpclient.Request{URL: target})
 	if err != nil {
 		return nil, 0, err

@@ -33,7 +33,7 @@ type ProfileResponse struct {
 
 // Fetch issues one profiling GET, capped to maxProfileBody and
 // ProfileFetchTimeout.
-func Fetch(ctx context.Context, client *httpclient.Client, target string) (*ProfileResponse, error) {
+func Fetch(ctx context.Context, client httpclient.HTTPDoer, target string) (*ProfileResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, ProfileFetchTimeout)
 	defer cancel()
 	resp, err := client.Do(ctx, httpclient.Request{URL: target})
@@ -83,7 +83,7 @@ func pace(opts Options) {
 // scan-start latency for zero concurrent-mutation surface on TargetProfile.
 // The provisional profile returned here is still enough to derive
 // ExtensionsForStack() for root calibration, per spec §3's own note.
-func ProfileTarget(ctx context.Context, client *httpclient.Client, target string, opts Options) *TargetProfile {
+func ProfileTarget(ctx context.Context, client httpclient.HTTPDoer, target string, opts Options) *TargetProfile {
 	p := newTargetProfile(hostOf(target))
 	p.Services = append(p.Services, ServiceTarget{BaseURL: target})
 

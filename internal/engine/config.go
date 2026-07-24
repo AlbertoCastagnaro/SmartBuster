@@ -36,6 +36,20 @@ type Config struct {
 	JitterKind    string        // override preset's JitterSpec.Kind
 	HeaderProfile string        // override preset's header profile
 
+	// Phase 6b TLS/HTTP-2 fingerprint mimicry + proxies (spec §7).
+	// Fingerprint is its own axis, orthogonal to Mode (spec §6): ""
+	// overrides nothing (stealth still defaults to "chrome", every other
+	// preset stays off); a non-empty value selects a BrowserProfile and
+	// switches the scan's whole HTTPDoer to the tls-client implementation
+	// (see ResolvePreset, newHTTPDoer). Proxy is a single opt-in upstream
+	// (http/https/socks5) passed to the fingerprint client at construction
+	// (spec §5); "" = direct connection. Both are resolved once at
+	// Coordinator construction and fixed for the scan's lifetime — never
+	// re-read on a live mode switch (spec §5: "one browser identity per
+	// session").
+	Fingerprint string
+	Proxy       string
+
 	// Phase 2a target profiling (spec §8).
 	RulesetDir   string   // system ruleset dir; "" = embedded defaults only
 	UserRulesDir string   // user overlay dir; "" = none

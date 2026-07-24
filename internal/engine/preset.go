@@ -34,12 +34,21 @@ type Preset struct {
 	Backoff       BackoffSpec
 	Epsilon       float64 // ε-greedy exploration; 0 in stealth
 
-	// 6b fields: present, unused in 6a. 6b's tls-client implementation
-	// selects on these once the HTTPDoer boundary (spec §6) grows a second
-	// implementation; stealth's TLSProfile/Proxies stay zero-valued until then.
+	// TLSProfile is Phase 6b's fingerprint axis (spec §2, §6): ""
+	// (every preset but stealth) keeps 6a's plain net/http-backed Client;
+	// a browser name ("chrome"|"firefox"|"safari") selects a coherent
+	// BrowserProfile (TLS ClientHello + HTTP/2 settings + header values +
+	// header order, spec §2's httpclient.BrowserProfile) with the
+	// tls-client HTTPDoer behind it instead — subsuming 6a's separate
+	// HeaderProfile for as long as fingerprinting is active (spec §2: "a
+	// Chrome JA3 wearing Firefox headers is itself a tell", so the two
+	// must never be selected independently once TLSProfile != ""). No
+	// separate proxy or HTTP2-fingerprint field belongs here: proxy is a
+	// single opt-in upstream for the whole session, not a per-mode
+	// property (Config.Proxy, spec §5), and the HTTP/2 fingerprint is
+	// already baked into TLSClient's bundled ClientProfile, not a value a
+	// preset picks on its own (spec §1: no proxy pool/rotation either).
 	TLSProfile string
-	Proxies    []string
-	HTTP2FP    string
 }
 
 // DefaultBackoffDecrease/Step/RecoveryWindow are spec §8's table defaults —
@@ -107,6 +116,10 @@ var presetTable = map[string]Preset{
 			Enabled: true, Decrease: 0.3, Step: 0.25, RecoveryWindow: 15 * time.Second,
 		},
 		Epsilon: 0,
+		// spec §7: stealth's TLSProfile defaults to "chrome" (latest
+		// bundled) — the fingerprint axis is on by default here, off
+		// everywhere else (spec §6), independently of --fingerprint.
+		TLSProfile: httpclient.ProfileChrome,
 	},
 }
 
@@ -145,5 +158,30 @@ func ResolvePreset(mode string, cfg Config) Preset {
 	if cfg.Epsilon != 0 {
 		p.Epsilon = cfg.Epsilon
 	}
+	// spec §6: --fingerprint is its own axis, independent of --mode —
+	// stealth defaults TLSProfile to "chrome" above, every other preset
+	// defaults it off ("", plain net/http), and an explicit --fingerprint
+	// overrides either default the same way --header-profile already does.
+	if cfg.Fingerprint != "" {
+		p.TLSProfile = cfg.Fingerprint
+	}
 	return p
+}
+
+// newHTTPDoer builds the HTTPDoer every on-target request shares for the
+// scan's lifetime (spec §2, §4 contract C): preset.TLSProfile == "" keeps
+// 6a's plain net/http-backed Client; otherwise it's 6b's tls-client-backed
+// TLSDoer, routed through cfg.Proxy if set (spec §5). Built once, here,
+// rather than per-request or re-built on a live mode switch — spec §5's
+// "one browser identity per session" (a tls-client instance's connection
+// pool is already committed to its ClientProfile's JA3 at construction).
+func newHTTPDoer(preset Preset, cfg Config) (httpclient.HTTPDoer, error) {
+	clientCfg := httpclient.Config{
+		Concurrency:    cfg.Concurrency,
+		RequestTimeout: cfg.RequestTO,
+	}
+	if preset.TLSProfile == "" {
+		return httpclient.New(clientCfg), nil
+	}
+	return httpclient.NewTLSDoer(clientCfg, preset.TLSProfile, cfg.Proxy)
 }

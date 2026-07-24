@@ -15,7 +15,7 @@ import (
 // confirmer probes (spec §4.7). Called once, when root calibration
 // finishes — see ProfileTarget's doc comment for why this is split out
 // from the initial profiling pass.
-func RefineAfterCalibration(ctx context.Context, client *httpclient.Client, p *TargetProfile, opts Options, baseline *types.Baseline, repBody string, repStatus int) {
+func RefineAfterCalibration(ctx context.Context, client httpclient.HTTPDoer, p *TargetProfile, opts Options, baseline *types.Baseline, repBody string, repStatus int) {
 	if opts.Ruleset != nil {
 		ApplyErrorPageSignal(p, opts.Ruleset, repBody, repStatus)
 	}
@@ -29,7 +29,7 @@ func RefineAfterCalibration(ctx context.Context, client *httpclient.Client, p *T
 // ActiveProbeConfHi) — worth confirming, not yet certain. A response that
 // diverges from the root baseline (calibration.Classify says IsHit)
 // confirms the tech, raising it to the rule's target confidence.
-func runActiveProbes(ctx context.Context, client *httpclient.Client, p *TargetProfile, opts Options, baseline *types.Baseline) {
+func runActiveProbes(ctx context.Context, client httpclient.HTTPDoer, p *TargetProfile, opts Options, baseline *types.Baseline) {
 	if opts.Ruleset == nil || len(p.Services) == 0 {
 		return
 	}

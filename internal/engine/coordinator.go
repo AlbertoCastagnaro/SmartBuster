@@ -121,18 +121,20 @@ type Coordinator struct {
 	wordlist []wordlist.Entry
 	scope    *scope.Scope
 
-	client httpclient.HTTPDoer // spec §6 client boundary: net/http today, a tls-client impl behind the stealth preset in 6b; RunWorker's only dependency
-	// httpClient is the same underlying client as the concrete *httpclient.Client
-	// type — kept alongside the HTTPDoer interface field above because
-	// profile/seed's on-target-but-not-candidate requests (target
-	// profiling, robots/sitemap, active-probe confirmation) are outside
-	// this phase's HTTPDoer boundary (spec §6 scopes 6a's swap to the
-	// worker's candidate requests only) and already depend on the concrete
-	// type's exact signature.
-	httpClient *httpclient.Client
-	limiter    *httpclient.Limiter
-	pacer      *httpclient.Pacer
-	rng        *rand.Rand
+	// client is the spec §6 HTTPDoer boundary: net/http's Client (6a) or,
+	// when fingerprinting is active (Preset.TLSProfile != ""), 6b's
+	// tls-client-backed TLSDoer. Every on-target request shares this one
+	// value — RunWorker's candidate dispatch, profile.ProfileTarget/
+	// RefineAfterCalibration, and seed.FetchRobots/FetchSitemaps all take
+	// it as an httpclient.HTTPDoer now (spec §4, contract C's consistency
+	// fix) — a fingerprinting WAF must never see two different clients
+	// hitting the same host. Off-target requests (seed.Wayback's CDX
+	// query, a different host entirely) are exempt and stay on their own
+	// plain net/http.Client (spec §4).
+	client  httpclient.HTTPDoer
+	limiter *httpclient.Limiter
+	pacer   *httpclient.Pacer
+	rng     *rand.Rand
 
 	frontier         *Frontier
 	dirs             map[string]*dirState
@@ -320,10 +322,18 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 	preset := ResolvePreset(mode, cfg)
 	cfg.Concurrency = preset.Concurrency
 
-	client := httpclient.New(httpclient.Config{
-		Concurrency:    cfg.Concurrency,
-		RequestTimeout: cfg.RequestTO,
-	})
+	// Phase 6b (spec §2, §5): preset.TLSProfile selects the fingerprint
+	// client ("" for every preset but stealth, unless --fingerprint
+	// overrides it — see ResolvePreset); fixed for the scan's whole
+	// lifetime once built (spec §5: "one browser identity per session" —
+	// a mode switch never swaps or reconstructs it, only the plain client's
+	// header-value profile is live-adjustable, see applyPreset). This same
+	// value becomes every on-target request's HTTPDoer — candidates via
+	// RunWorker, and profiling/seed via c.client below (contract C).
+	client, err := newHTTPDoer(preset, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build http client: %w", err)
+	}
 	limiter := httpclient.NewLimiterSpec(preset.RateCap, preset.Jitter)
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	pacer := httpclient.NewPacer(limiter, rng)
@@ -398,7 +408,6 @@ func NewCoordinator(target string, wl []wordlist.Entry, cfg Config, sc *scope.Sc
 		wordlist:    wl,
 		scope:       sc,
 		client:      client,
-		httpClient:  client,
 		limiter:     limiter,
 		pacer:       pacer,
 		rng:         rng,
@@ -943,7 +952,7 @@ func (c *Coordinator) finishCalibration(dir string, ds *dirState) {
 	if dir == "" && c.profileState != nil && !c.rootRefined {
 		c.rootRefined = true
 		c.profileState.IsSPA = baseline.IsSPA
-		profile.RefineAfterCalibration(c.runCtx, c.httpClient, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
+		profile.RefineAfterCalibration(c.runCtx, c.client, c.profileState, c.profileOpts(), &baseline, baseline.RepBody, baseline.RepStatus)
 		c.reprioritizeIfChanged() // spec §7(b): RefineAfterCalibration mutated the profile
 		c.emitTechDetected()
 

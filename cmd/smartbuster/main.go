@@ -267,6 +267,8 @@ func runScan(args []string) {
 	jitter := fs.Float64("jitter", 0, "fractional uniform jitter applied to the pacing interval; 0 = the selected --mode's own jitter distribution")
 	jitterKind := fs.String("jitter-kind", "", "override the selected --mode's jitter distribution kind: none|uniform|gaussian|bursty")
 	headerProfile := fs.String("header-profile", "", "override the selected --mode's header profile: minimal|chrome|firefox|safari")
+	fingerprint := fs.String("fingerprint", "", "TLS/HTTP-2 browser fingerprint mimicry (spec §6, tier 3): chrome|firefox|safari; \"\" = the selected --mode's own default (off for fast/normal/quiet, chrome for stealth)")
+	proxy := fs.String("proxy", "", "route every on-target request through this upstream proxy (http/https/socks5), e.g. http://127.0.0.1:8080 or socks5://127.0.0.1:9050 (spec §5); \"\" = direct connection")
 	budget := fs.Duration("budget", 0, "spread the scan over roughly this much wall-clock time (time-budget pacing, spec §3); 0 = off")
 	maxDepth := fs.Int("depth", engine.DefaultMaxDepth, "max recursion depth")
 	requestTO := fs.Duration("timeout", engine.DefaultRequestTO, "per-request timeout")
@@ -356,6 +358,7 @@ func runScan(args []string) {
 	cfg := engine.Config{
 		Targets: targets, Wordlist: *wordlistPath, Concurrency: *concurrency,
 		Mode: *mode, Budget: *budget, JitterKind: *jitterKind, HeaderProfile: *headerProfile,
+		Fingerprint: *fingerprint, Proxy: *proxy,
 		Rate: *rate, Jitter: *jitter, MaxDepth: *maxDepth, RequestTO: *requestTO,
 		Seed: *seed, DryRun: *dryRun, OutDir: *outDir,
 		RulesetDir: *rulesetDir, UserRulesDir: *userRulesDir, RulesOff: rulesOff,

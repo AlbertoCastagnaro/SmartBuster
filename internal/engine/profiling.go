@@ -83,7 +83,7 @@ func (c *Coordinator) paceProfileRequest() {
 // provisional TargetProfile, derive the calibration extension set from it,
 // and merge any nmap data — all before root calibration begins.
 func (c *Coordinator) profileTarget(ctx context.Context) {
-	c.profileState = profile.ProfileTarget(ctx, c.httpClient, c.target, c.profileOpts())
+	c.profileState = profile.ProfileTarget(ctx, c.client, c.target, c.profileOpts())
 	c.extSet = c.profileState.ExtensionsForStack()
 	// Phase 3 (spec §0 contract B): the dynamic layer binds to the same
 	// profileState pointer RefineAfterCalibration mutates in place below,

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlbertoCastagnaro/SmartBuster/internal/httpclient"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/scope"
 	"github.com/AlbertoCastagnaro/SmartBuster/internal/wordlist"
 )
@@ -276,5 +277,62 @@ func TestPopBand_StaysWithinTopTierButShuffles(t *testing.T) {
 	// The outlier is all that's left now.
 	if last := f.Pop(); last.Path != "outlier" {
 		t.Fatalf("expected the outlier to be the only thing left, got %q", last.Path)
+	}
+}
+
+// TestResolvePreset_FingerprintAxis is spec §6: --fingerprint is its own
+// axis, independent of --mode — stealth defaults TLSProfile to "chrome",
+// every other preset defaults it off, and an explicit override wins either
+// way (mirroring how --header-profile already overrides HeaderProfile).
+func TestResolvePreset_FingerprintAxis(t *testing.T) {
+	if got := ResolvePreset("normal", Config{}).TLSProfile; got != "" {
+		t.Fatalf("expected normal mode's TLSProfile to default off, got %q", got)
+	}
+	if got := ResolvePreset("fast", Config{}).TLSProfile; got != "" {
+		t.Fatalf("expected fast mode's TLSProfile to default off, got %q", got)
+	}
+	if got := ResolvePreset("stealth", Config{}).TLSProfile; got != httpclient.ProfileChrome {
+		t.Fatalf("expected stealth mode's TLSProfile to default to chrome, got %q", got)
+	}
+	if got := ResolvePreset("normal", Config{Fingerprint: "firefox"}).TLSProfile; got != "firefox" {
+		t.Fatalf("expected --fingerprint to override normal mode's off-by-default TLSProfile, got %q", got)
+	}
+	if got := ResolvePreset("stealth", Config{Fingerprint: "safari"}).TLSProfile; got != "safari" {
+		t.Fatalf("expected --fingerprint to override stealth's own chrome default, got %q", got)
+	}
+}
+
+// TestNewCoordinator_FingerprintSelectsHTTPDoer is the structural half of
+// contract C's consistency fix: NewCoordinator builds exactly one HTTPDoer
+// (spec §4) — a plain httpclient.Client when no fingerprint is active, a
+// tls-client-backed httpclient.TLSDoer when it is — and that single value
+// is what profile/seed/worker all now share (see profiling.go, seed.go,
+// worker.go), so there is no longer a second concrete client for a
+// fingerprinting WAF to tell apart from the worker's own requests.
+func TestNewCoordinator_FingerprintSelectsHTTPDoer(t *testing.T) {
+	entries := []wordlist.Entry{{Word: "admin"}}
+
+	plain, err := NewCoordinator("http://example.invalid", entries, Config{Mode: "normal", Seed: 1}, presetTestScope(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain.client.(*httpclient.Client); !ok {
+		t.Fatalf("expected normal mode (no fingerprint) to build a plain httpclient.Client, got %T", plain.client)
+	}
+
+	stealth, err := NewCoordinator("http://example.invalid", entries, Config{Mode: "stealth", Seed: 1}, presetTestScope(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stealth.client.(*httpclient.TLSDoer); !ok {
+		t.Fatalf("expected stealth mode to build a tls-client-backed TLSDoer, got %T", stealth.client)
+	}
+
+	explicit, err := NewCoordinator("http://example.invalid", entries, Config{Mode: "normal", Fingerprint: "firefox", Seed: 1}, presetTestScope(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := explicit.client.(*httpclient.TLSDoer); !ok {
+		t.Fatalf("expected --fingerprint to select a TLSDoer even in normal mode, got %T", explicit.client)
 	}
 }
